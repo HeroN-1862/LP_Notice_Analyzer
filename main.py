@@ -4,7 +4,7 @@ Run: uvicorn main:app --reload --port 8000
 """
 import os, json, base64, io, time, hashlib, asyncio
 from pathlib import Path
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +22,7 @@ GEMINI_MODEL = "gemini-3-flash-preview"
 GEMINI_TEMPERATURE = 0.1
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
 
 for d in [DATA_DIR, PDF_DIR, PAGE_DIR]:
     d.mkdir(parents=True, exist_ok=True)
@@ -49,6 +50,11 @@ async def serve_app():
     if cwd_html.exists():
         return FileResponse(str(cwd_html), media_type="text/html")
     raise HTTPException(404, f"index.html not found. Checked: {_index_html}, {cwd_html}")
+
+@app.get("/api/auth/config")
+async def auth_config():
+    """Return Supabase public config for frontend auth. No auth required."""
+    return {"supabase_url": SUPABASE_URL, "supabase_anon_key": SUPABASE_ANON_KEY}
 
 # ── Database (Supabase) ────────────────────────────────
 _supabase = None
@@ -167,6 +173,54 @@ def copy_storage(src_id: str, dst_id: str):
     tm = load_text_map(src_id)
     if tm:
         store_text_map(dst_id, tm)
+
+
+# ── Authentication ─────────────────────────────────────
+async def get_current_user(request: Request):
+    """Extract and verify JWT from Authorization header. Returns dict with id, email."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "Not authenticated")
+    token = auth[7:]
+    try:
+        user_resp = get_supa().auth.get_user(token)
+        u = user_resp.user
+        if not u:
+            raise HTTPException(401, "Invalid token")
+        # Auto-register in user_roles on first API call
+        existing = db_get("user_roles", u.id, id_col="user_id")
+        if not existing:
+            db_insert("user_roles", {"user_id": u.id, "email": u.email, "role": "user"})
+            print(f"  [AUTH] New user registered: {u.email} ({u.id})")
+        return {"id": u.id, "email": u.email}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(401, f"Authentication failed: {str(e)[:100]}")
+
+async def get_user_role(user_id: str) -> str:
+    """Get user role from user_roles table. Returns 'admin' or 'user'."""
+    r = db_get("user_roles", user_id, id_col="user_id")
+    return r["role"] if r else "user"
+
+async def require_admin(request: Request):
+    """Verify user is admin. Returns user dict."""
+    user = await get_current_user(request)
+    role = await get_user_role(user["id"])
+    if role != "admin":
+        raise HTTPException(403, "Admin access required")
+    user["role"] = "admin"
+    return user
+
+async def check_notice_access(notice_id: str, user: dict):
+    """Check if user owns the notice (or is admin). Returns notice DB row."""
+    r = db_get("notices", notice_id)
+    if not r:
+        raise HTTPException(404, "Notice not found")
+    role = await get_user_role(user["id"])
+    if role != "admin" and r.get("user_id") and r["user_id"] != user["id"]:
+        raise HTTPException(403, "Access denied")
+    return r
 
 
 # ── Duplicate Detection ────────────────────────────────
@@ -1279,11 +1333,13 @@ class UploadResponse(BaseModel):
 
 @app.post("/api/upload")
 async def upload_notice(
+    request: Request,
     file: UploadFile = File(...),
     model: Optional[str] = Form(None)
 ):
     """Upload PDF, parse with Gemini, process PDF pages.
     Returns SSE stream with stage events: received → parsing → done/duplicate/error."""
+    user = await get_current_user(request)
     pdf_bytes = await file.read()
     file_name = file.filename
 
@@ -1401,7 +1457,7 @@ async def upload_notice(
 
             # Save to DB
             db_insert("notices", {
-                    "id": notice_id, "file_name": file_name,
+                    "id": notice_id, "file_name": file_name, "user_id": user["id"],
                     "header": header, "line_items": line_items,
                     "raw_ai_response": gemini_result["raw_text"],
                     "pdf_hash": pdf_hash, "page_count": pdf_info["page_count"], "duplicate_key": dup_key
@@ -1430,7 +1486,8 @@ async def upload_notice(
 # ── Duplicate Resolution ───────────────────────────────
 
 @app.put("/api/notices/{new_id}/resolve-duplicate")
-async def resolve_duplicate(new_id: str, body: dict):
+async def resolve_duplicate(new_id: str, body: dict, request: Request):
+    user = await get_current_user(request)
     """Resolve a duplicate notice. action: 'keep_existing' or 'replace_with_new'."""
     action = body.get("action")
     existing_id = body.get("existing_id")
@@ -1450,6 +1507,7 @@ async def resolve_duplicate(new_id: str, body: dict):
         # Save pending as new notice
         db_insert("notices", {
                 "id": pending["notice_id"], "file_name": pending["file_name"],
+                "user_id": user["id"],
                 "header": pending["header"], "line_items": pending["line_items"],
                 "raw_ai_response": pending["raw_text"],
                 "pdf_hash": pending["pdf_hash"], "page_count": pending["page_count"],
@@ -1467,7 +1525,9 @@ async def resolve_duplicate(new_id: str, body: dict):
 
 
 @app.post("/api/notices/{notice_id}/reparse")
-async def reparse_notice(notice_id: str, model: Optional[str] = Query(None)):
+async def reparse_notice(notice_id: str, request: Request, model: Optional[str] = Query(None)):
+    user = await get_current_user(request)
+    await check_notice_access(notice_id, user)
     """Re-parse an existing notice from its stored PDF. Updates in-place (same ID).
     Returns SSE stream like /api/upload."""
     # Find existing notice and its PDF
@@ -1608,12 +1668,14 @@ Instructions:
 
 @app.post("/api/upload/parse-lp")
 async def parse_multi_lp(
+    request: Request,
     notice_id: str = Form(...),
     lp_codes: str = Form(...),
     model: Optional[str] = Form(None)
 ):
     """Parse a multi-LP omnibus notice for specific LP codes.
     Returns SSE stream: lp_parsing → lp_done/lp_error per LP → all_done."""
+    user = await get_current_user(request)
     lp_list = json.loads(lp_codes)
     if not lp_list:
         raise HTTPException(400, "No LP codes provided")
@@ -1805,7 +1867,7 @@ async def parse_multi_lp(
                 try: db_delete("notices", sub_id)
                 except: pass
                 db_insert("notices", {
-                    "id": sub_id, "file_name": file_label,
+                    "id": sub_id, "file_name": file_label, "user_id": user["id"],
                     "header": header, "line_items": line_items,
                     "raw_ai_response": gemini_result["raw_text"],
                     "pdf_hash": pdf_hash, "page_count": page_count, "duplicate_key": dup_key
@@ -1831,7 +1893,8 @@ async def parse_multi_lp(
 # ── Deferred Multi-LP Notice (LP code unknown) ────────
 
 @app.post("/api/notices/defer-lp")
-async def defer_multi_lp(body: dict):
+async def defer_multi_lp(body: dict, request: Request):
+    user = await get_current_user(request)
     """Save a placeholder notice for a multi-LP PDF when the user doesn't know
     the LP code yet. The PDF is already on disk from the upload stage.
     The user can later click this notice and enter their LP code to trigger parsing."""
@@ -1867,7 +1930,7 @@ async def defer_multi_lp(body: dict):
     _pdf_for_hash = load_pdf(notice_id)
     pdf_hash = hashlib.md5(_pdf_for_hash[:4096]).hexdigest()[:12] if _pdf_for_hash else ""
     db_upsert("notices", {
-        "id": notice_id, "file_name": file_name,
+        "id": notice_id, "file_name": file_name, "user_id": user["id"],
         "header": header, "line_items": [],
         "raw_ai_response": "", "pdf_hash": pdf_hash,
         "page_count": page_count, "duplicate_key": ""
@@ -1885,8 +1948,17 @@ async def defer_multi_lp(body: dict):
 
 
 @app.get("/api/notices")
-async def list_notices():
-    rows = db_list("notices", order_col="created_at", order_desc=True)
+async def list_notices(request: Request, view_user: Optional[str] = Query(None)):
+    user = await get_current_user(request)
+    role = await get_user_role(user["id"])
+    # Admin can view any user's data via ?view_user=xxx
+    target_user_id = user["id"]
+    if role == "admin" and view_user:
+        target_user_id = view_user
+    if role == "admin" and not view_user:
+        rows = db_list("notices", order_col="created_at", order_desc=True)
+    else:
+        rows = db_list("notices", order_col="created_at", order_desc=True, user_id=target_user_id)
     result = []
     for r in rows:
         header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
@@ -1902,8 +1974,9 @@ async def list_notices():
 
 
 @app.get("/api/notices/{notice_id}")
-async def get_notice(notice_id: str):
-    r = db_get("notices", notice_id)
+async def get_notice(notice_id: str, request: Request):
+    user = await get_current_user(request)
+    r = await check_notice_access(notice_id, user)
     if not r:
         raise HTTPException(404, "Notice not found")
     header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
@@ -1919,16 +1992,19 @@ async def get_notice(notice_id: str):
 
 
 @app.delete("/api/notices/{notice_id}")
-async def delete_notice(notice_id: str):
+async def delete_notice(notice_id: str, request: Request):
+    user = await get_current_user(request)
+    await check_notice_access(notice_id, user)
     db_delete("notices", notice_id)
     delete_storage(notice_id)
     return {"ok": True}
 
 
 @app.put("/api/notices/{notice_id}/items/{item_idx}")
-async def update_item(notice_id: str, item_idx: int, updates: dict):
+async def update_item(notice_id: str, item_idx: int, updates: dict, request: Request):
     """Update a single line item (toggle type, commit, etc.)."""
-    r = db_get("notices", notice_id)
+    user = await get_current_user(request)
+    r = await check_notice_access(notice_id, user)
     if not r: raise HTTPException(404)
     items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
     if item_idx < 0 or item_idx >= len(items): raise HTTPException(400, "Invalid index")
@@ -1938,9 +2014,10 @@ async def update_item(notice_id: str, item_idx: int, updates: dict):
 
 
 @app.put("/api/notices/{notice_id}/header")
-async def update_header(notice_id: str, updates: dict):
+async def update_header(notice_id: str, updates: dict, request: Request):
     """Update header fields. Also handles is_voided/voided_by (DB columns)."""
-    r = db_get("notices", notice_id)
+    user = await get_current_user(request)
+    r = await check_notice_access(notice_id, user)
     if not r: raise HTTPException(404)
     header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
     set_voided = updates.pop("is_voided", None)
@@ -1955,7 +2032,9 @@ async def update_header(notice_id: str, updates: dict):
 
 
 @app.put("/api/notices/{notice_id}/items")
-async def bulk_update_items(notice_id: str, items: list = Body(...)):
+async def bulk_update_items(notice_id: str, request: Request, items: list = Body(...)):
+    user = await get_current_user(request)
+    await check_notice_access(notice_id, user)
     """Replace all line items (for correction apply)."""
     db_update("notices", {"line_items": items}, notice_id)
     return {"ok": True}
@@ -1966,7 +2045,9 @@ async def bulk_update_items(notice_id: str, items: list = Body(...)):
 
 
 @app.get("/api/notices/{notice_id}/text-map")
-async def get_text_map(notice_id: str, page: Optional[int] = None):
+async def get_text_map(notice_id: str, request: Request, page: Optional[int] = None):
+    user = await get_current_user(request)
+    await check_notice_access(notice_id, user)
     text_map = load_text_map(notice_id)
     if page:
         text_map = [t for t in text_map if t["p"] == page]
@@ -1974,7 +2055,9 @@ async def get_text_map(notice_id: str, page: Optional[int] = None):
 
 
 @app.get("/api/notices/{notice_id}/pdf")
-async def get_pdf(notice_id: str):
+async def get_pdf(notice_id: str, request: Request):
+    user = await get_current_user(request)
+    await check_notice_access(notice_id, user)
     pdf_bytes = load_pdf(notice_id)
     if not pdf_bytes:
         raise HTTPException(404, "PDF not found")
@@ -1990,7 +2073,9 @@ class QaRequest(BaseModel):
     question: str
 
 @app.post("/api/qa")
-async def qa_chat(req: QaRequest):
+async def qa_chat(req: QaRequest, request: Request):
+    user = await get_current_user(request)
+    await check_notice_access(req.notice_id, user)
     r = db_get("notices", req.notice_id)
     if not r: raise HTTPException(404)
     header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
@@ -2032,7 +2117,8 @@ Answer in the user's language. Be concise."""
 
 # ── Models list ─────────────────────────────────────────
 @app.get("/api/models")
-async def list_models():
+async def list_models(request: Request):
+    user = await get_current_user(request)
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}"
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url)
@@ -2049,7 +2135,8 @@ async def list_models():
 # ── Settings ────────────────────────────────────────────
 
 @app.get("/api/settings")
-async def get_settings():
+async def get_settings(request: Request):
+    user = await get_current_user(request)
     """Return all AI-related settings."""
     return {
         "gemini_model": _get_setting("gemini_model", GEMINI_MODEL),
@@ -2057,7 +2144,8 @@ async def get_settings():
     }
 
 @app.put("/api/settings")
-async def update_settings(body: dict):
+async def update_settings(body: dict, request: Request):
+    user = await get_current_user(request)
     """Update AI-related settings."""
     allowed = {"gemini_model", "gemini_temperature"}
     for k, v in body.items():
@@ -2163,7 +2251,8 @@ async def _call_gemini_text(prompt: str, model: str = None, temperature: float =
 
 
 @app.post("/api/asset-groups")
-async def create_asset_groups(body: dict):
+async def create_asset_groups(body: dict, request: Request):
+    user = await get_current_user(request)
     """AI-based asset name grouping with two-pass strategy. Returns SSE stream."""
     fund_key = body.get("fund_key", "")
     asset_names = body.get("asset_names", [])
@@ -2284,7 +2373,8 @@ async def create_asset_groups(body: dict):
 
 
 @app.get("/api/asset-groups/{fund_key}")
-async def get_asset_groups(fund_key: str):
+async def get_asset_groups(fund_key: str, request: Request):
+    user = await get_current_user(request)
     """Retrieve saved asset groups for a fund."""
     r = db_get("asset_groups", fund_key, id_col="fund_key")
     if not r:
@@ -2297,11 +2387,84 @@ async def get_asset_groups(fund_key: str):
 
 
 @app.put("/api/asset-groups/{fund_key}")
-async def save_asset_groups(fund_key: str, body: dict):
+async def save_asset_groups(fund_key: str, body: dict, request: Request):
+    user = await get_current_user(request)
     """Save/update asset groups for a fund."""
     groups = body.get("groups", {})
     db_upsert("asset_groups", {"fund_key": fund_key, "groups_json": groups})
     return {"ok": True, "fund_key": fund_key}
+
+
+# ── Auth Info ──────────────────────────────────────────
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    """Return current user info + role."""
+    user = await get_current_user(request)
+    role = await get_user_role(user["id"])
+    return {"id": user["id"], "email": user["email"], "role": role}
+
+
+# ── Admin API ──────────────────────────────────────────
+@app.get("/api/admin/users")
+async def admin_list_users(request: Request):
+    """List all users with notice counts. Admin only."""
+    admin = await require_admin(request)
+    roles = db_list("user_roles", order_col="created_at", order_desc=False)
+    result = []
+    for r in roles:
+        # Count notices for this user
+        notices = db_list("notices", user_id=r["user_id"])
+        result.append({
+            "user_id": r["user_id"],
+            "email": r.get("email", ""),
+            "role": r.get("role", "user"),
+            "created_at": r.get("created_at"),
+            "notice_count": len(notices),
+        })
+    return result
+
+@app.get("/api/admin/users/{uid}/notices")
+async def admin_user_notices(uid: str, request: Request):
+    """List notices for a specific user. Admin only."""
+    admin = await require_admin(request)
+    rows = db_list("notices", order_col="created_at", order_desc=True, user_id=uid)
+    result = []
+    for r in rows:
+        header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
+        line_items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
+        result.append({
+            "id": r["id"], "fileName": r.get("file_name",""), "analyzedAt": r.get("analyzed_at"),
+            "header": header, "lineItems": line_items,
+            "is_voided": bool(r.get("is_voided")), "voided_by": r.get("voided_by"),
+            "page_count": r.get("page_count") or 0,
+        })
+    return result
+
+@app.put("/api/admin/users/{uid}/role")
+async def admin_update_role(uid: str, body: dict, request: Request):
+    """Change user role. Admin only."""
+    admin = await require_admin(request)
+    new_role = body.get("role", "user")
+    if new_role not in ("user", "admin"):
+        raise HTTPException(400, "Role must be 'user' or 'admin'")
+    db_update("user_roles", {"role": new_role}, uid, id_col="user_id")
+    return {"ok": True, "user_id": uid, "role": new_role}
+
+@app.delete("/api/admin/users/{uid}")
+async def admin_delete_user(uid: str, request: Request):
+    """Delete a user's data (notices + storage). Admin only."""
+    admin = await require_admin(request)
+    if uid == admin["id"]:
+        raise HTTPException(400, "Cannot delete yourself")
+    # Delete all notices + files for this user
+    notices = db_list("notices", user_id=uid)
+    for n in notices:
+        delete_storage(n["id"])
+        db_delete("notices", n["id"])
+    # Delete role entry
+    try: db_delete("user_roles", uid, id_col="user_id")
+    except: pass
+    return {"ok": True, "deleted_notices": len(notices)}
 
 
 # ── Health ──────────────────────────────────────────────
