@@ -344,6 +344,7 @@ details>summary{list-style:none}details>summary::-webkit-details-marker{display:
   .dg{grid-template-columns:1fr 1fr}.sum-row{grid-template-columns:1fr 1fr}
 }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 <div class="app">
@@ -362,9 +363,91 @@ details>summary{list-style:none}details>summary::-webkit-details-marker{display:
  * ============================================================
  */
 const API=location.origin; // auto-detect: works for localhost and deployed URLs
+
+/* ===== AUTH ===== */
+let _sb = null; // Supabase client
+let _session = null; // current session
+let _userRole = 'user'; // 'user' or 'admin'
+
+async function initAuth() {
+  try {
+    const cfg = await authFetch(`${API}/api/auth/config`).then(r=>r.json());
+    if (cfg.supabase_url && cfg.supabase_anon_key) {
+      _sb = supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key);
+      const { data } = await _sb.auth.getSession();
+      if (data.session) {
+        _session = data.session;
+        await loadUserRole();
+        return true;
+      }
+    }
+  } catch(e) { console.warn('Auth init failed:', e); }
+  return false;
+}
+
+async function loadUserRole() {
+  try {
+    const r = await authFetch(`${API}/api/auth/me`);
+    if (r.ok) {
+      const d = await r.json();
+      _userRole = d.role || 'user';
+      S._adminViewUser = null; // reset admin view
+    }
+  } catch(e) { _userRole = 'user'; }
+}
+
+async function authFetch(url, opts = {}) {
+  if (!_session) throw new Error('Not authenticated');
+  if (!opts.headers) opts.headers = {};
+  opts.headers['Authorization'] = `Bearer ${_session.access_token}`;
+  const resp = await fetch(url, opts);
+  if (resp.status === 401) {
+    // Try refresh
+    if (_sb) {
+      const { data } = await _sb.auth.refreshSession();
+      if (data.session) {
+        _session = data.session;
+        opts.headers['Authorization'] = `Bearer ${_session.access_token}`;
+        return fetch(url, opts);
+      }
+    }
+    _session = null;
+    S.page = 'login'; R();
+  }
+  return resp;
+}
+
+async function doLogin(email, password) {
+  if (!_sb) return { error: 'Auth not initialized' };
+  const { data, error } = await _sb.auth.signInWithPassword({ email, password });
+  if (error) return { error: error.message };
+  _session = data.session;
+  await loadUserRole();
+  return { ok: true };
+}
+
+async function doRegister(email, password) {
+  if (!_sb) return { error: 'Auth not initialized' };
+  const { data, error } = await _sb.auth.signUp({ email, password });
+  if (error) return { error: error.message };
+  // If email confirmation required, data.user exists but session may be null
+  if (data.user && !data.session) return { needsConfirmation: true };
+  _session = data.session;
+  return { ok: true };
+}
+
+async function doLogout() {
+  if (_sb) await _sb.auth.signOut();
+  _session = null;
+  _userRole = 'user';
+  S.notices = [];
+  S.page = 'login';
+  R();
+}
+
 /* ===== STATE ===== */
 const S = {
-  page:'upload', models:[], selectedModel:'',
+  page:'login', models:[], selectedModel:'',
   connected:false,
   notices: [],
   activeNoticeId: null,
@@ -390,6 +473,8 @@ const S = {
   _aeLoading: null,     // asset group AI loading state
   _aePanel: false,      // hierarchy panel open/closed
   showFundMerge: null,  // fund merge confirmation popup
+  _adminViewUser: null,  // admin viewing another user's data
+  _adminUsers: [],       // admin user list cache
 };
 let _noticeCounter = 0;
 let _batchCounter = 0;
@@ -397,7 +482,7 @@ let _batchCounter = 0;
 /* ===== BACKEND PERSISTENCE ===== */
 async function loadFromBackend(){
   try{
-    const resp=await fetch(`${API}/api/notices`);
+    const resp=await authFetch(`${API}/api/notices`);
     if(!resp.ok) return;
     const data=await resp.json();
     S.notices=data;
@@ -424,18 +509,18 @@ async function loadFromBackend(){
     _prevVoided.forEach(id=>{
       const n=S.notices.find(x=>x.id===id);
       if(n && !n.is_voided){
-        fetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+        authFetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({is_voided:false,voided_by:null})}).catch(()=>{});
       }
     });
     S.notices.filter(n=>n.is_voided && !_prevVoided.includes(n.id)).forEach(n=>{
-      fetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+      authFetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({is_voided:true,voided_by:n.voided_by})}).catch(()=>{});
     });
     S.connected=true;
     // Load saved settings
     try{
-      const sr=await fetch(`${API}/api/settings`);
+      const sr=await authFetch(`${API}/api/settings`);
       if(sr.ok){const sd=await sr.json();S.geminiModel=sd.gemini_model;S.geminiTemperature=sd.gemini_temperature;}
     }catch(e){}
     loadGeminiModels();
@@ -466,20 +551,35 @@ function recalcAll(){
 
 function clearStorage(){
   if(!confirm('서버의 모든 데이터를 삭제하시겠습니까?')) return;
-  Promise.all(S.notices.map(n=>fetch(`${API}/api/notices/${n.id}`,{method:'DELETE'}))).then(()=>{
+  Promise.all(S.notices.map(n=>authFetch(`${API}/api/notices/${n.id}`,{method:'DELETE'}))).then(()=>{
     S.notices=[];S.nameReg={fund:{},lp:{}};R();
   });
 }
 
-// Load on start
-loadFromBackend();
+// Load on start — check auth first
+(async function startup() {
+  const authed = await initAuth();
+  if (authed) {
+    S.page = 'upload';
+    await loadFromBackend();
+  } else {
+    S.page = 'login';
+    R();
+  }
+})();
 
 /* ===== RENDER ===== */
 function R(){
+  const isAuth=S.page==='login'||S.page==='register'||S.page==='verify_email';
+  const sbEl=document.getElementById('sb');
+  if(sbEl) sbEl.style.display=isAuth?'none':'';
+  const mainEl=document.querySelector('.main');
+  if(mainEl) mainEl.style.marginLeft=isAuth?'0':'';
   // Save sidebar scroll position before re-render
   const sbNav=document.querySelector('.sb-nav');
   const sbScroll=sbNav?sbNav.scrollTop:0;
-  renderSB();renderPG();bindEv();saveState();
+  if(!isAuth) renderSB();
+  renderPG();bindEv();saveState();
   // Restore sidebar scroll position
   requestAnimationFrame(()=>{
     const sbNav2=document.querySelector('.sb-nav');
@@ -544,6 +644,7 @@ function renderSB(){
       <div class="sb-it ${S.page==='upload'?'act':''} ${!S.connected?'dis':''}" onclick="go('upload')"><span class="ic">+</span><span>PDF 업로드</span>${uploadBadge}</div>
       <div class="sb-it ${S.page==='portfolio'?'act':''} ${!notices.length?'dis':''}" onclick="go('portfolio')"><span class="ic">◈</span><span>Portfolio</span>
         ${notices.length?`<span class="badge ok">${notices.length}</span>`:''}</div>
+      ${_userRole==='admin'?`<div class="sb-it ${S.page==='admin'?'act':''}" onclick="goAdmin()"><span class="ic">👤</span><span>사용자 관리</span></div>`:''}
       ${notices.length?`<div class="sb-div"></div><div class="sb-gl" style="display:flex;align-items:center;justify-content:space-between">
         <span>Notices (${notices.length})</span>
         <span onclick="sbCollapseAll()" style="cursor:pointer;font-size:10px;color:var(--t3);padding:2px 6px;border-radius:3px;border:1px solid var(--bdr);user-select:none;transition:all .12s" onmouseover="this.style.color='var(--t1)'" onmouseout="this.style.color='var(--t3)'" title="${_sbAllCollapsed?'모든 펀드 Notice 펼치기':'모든 펀드 Notice 접기'}">${_sbAllCollapsed?'펼치기':'접기'}</span>
@@ -655,19 +756,40 @@ function renderSB(){
       })()}
     </nav>
     <div class="sb-foot">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+      ${_session?`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div style="font-size:10px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px" title="${escH(_session.user?.email||'')}">${escH(_session.user?.email||'')}</div>
+        <div style="display:flex;gap:4px">
+          <div class="sb-it" style="padding:3px 8px;margin:0;font-size:11px;gap:4px;cursor:pointer;border-radius:4px;${S.page==='settings'?'background:var(--bg4);font-weight:600':''}" onclick="go('settings')"><span class="ic" style="font-size:12px">⚙</span><span>설정</span></div>
+          <div class="sb-it" style="padding:3px 8px;margin:0;font-size:11px;gap:4px;cursor:pointer;border-radius:4px;color:var(--t3)" onclick="doLogout()"><span class="ic" style="font-size:11px">↪</span><span>로그아웃</span></div>
+        </div>
+      </div>`:''}
+      <div style="display:flex;align-items:center;justify-content:space-between">
         <div>${S.connected?`<span style="color:var(--teal);font-size:11px">● 연결됨</span>`:'<span style="color:var(--red);font-size:11px">● 연결 안됨</span>'}</div>
-        <div class="sb-it" style="padding:3px 8px;margin:0;font-size:11px;gap:4px;cursor:pointer;border-radius:4px;${S.page==='settings'?'background:var(--bg4);font-weight:600':''}" onclick="go('settings')"><span class="ic" style="font-size:12px">⚙</span><span>설정</span></div>
+        ${_userRole==='admin'?'<span style="font-size:9px;color:var(--indigo);font-weight:600;background:var(--indigo-d);padding:1px 5px;border-radius:3px">ADMIN</span>':''}
       </div>
-      <div class="mdl">${API}</div>
-      ${S.notices.length?`<div style="margin-top:2px;font-size:11px;color:var(--t3)">${S.notices.length}건 저장됨</div>`:''}
     </div>`;
 }
 
 function go(p){
   if(p==='upload'&&!S.connected)return;
   if(p==='portfolio'&&!S.notices.length)return;
+  // Restore own notices when leaving admin user view
+  if(S._adminViewUser && S._savedNotices){
+    S.notices=S._savedNotices;
+    S._savedNotices=null;
+    S._adminViewUser=null;
+  }
   S.page=p;R();
+}
+
+function goAdmin(){
+  // Restore own notices first
+  if(S._adminViewUser && S._savedNotices){
+    S.notices=S._savedNotices;
+    S._savedNotices=null;
+    S._adminViewUser=null;
+  }
+  S.page='admin';R();
 }
 function toggleSbFund(idx){const k=window._sbFundKeys[idx];S.sbOpen[k]=S.sbOpen[k]===false?true:false;R();}
 function viewNotice(id,autoCorrect){
@@ -704,11 +826,18 @@ function viewNotice(id,autoCorrect){
 
 function renderPG(){
   const h=document.getElementById('ph'),b=document.getElementById('pb');
+  // Auth pages — no sidebar needed
+  if(S.page==='login'||S.page==='register'||S.page==='verify_email'){
+    h.innerHTML='';
+    b.innerHTML=pgAuth();
+    return;
+  }
   switch(S.page){
     case'settings':h.innerHTML='<h1>설정</h1><p>서버 연결 · AI 모델 · Temperature</p>';b.innerHTML=pgSettings();loadGeminiModels();break;
     case'upload':h.innerHTML='<h1>PDF 업로드</h1><p>Notice PDF를 업로드하면 자동 분석 후 누적 관리됩니다</p>';b.innerHTML=pgUpload();break;
     case'portfolio':h.innerHTML=`<h1>Portfolio Overview</h1><p>${S.notices.length}건의 Notice · Fund → LP → Class 계층 구조</p>`;b.innerHTML=pgPortfolio();break;
     case'result':renderResultPG(h,b);break;
+    case'admin':h.innerHTML='<h1>사용자 관리</h1><p>가입된 사용자 목록 및 데이터 관리</p>';b.innerHTML=pgAdmin();loadAdminUsers();break;
   }
   // Global popups — render regardless of current page
   let globalPopups='';
@@ -727,6 +856,168 @@ function renderPG(){
 }
 
 /* ===== SETTINGS ===== */
+/* ===== AUTH PAGES ===== */
+function pgAuth(){
+  if(S.page==='verify_email'){
+    return`<div style="display:flex;justify-content:center;align-items:center;min-height:80vh">
+      <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--rl);padding:40px;width:380px;text-align:center">
+        <div style="font-size:40px;margin-bottom:16px">📧</div>
+        <h2 style="margin:0 0 8px;font-size:20px">이메일 인증 필요</h2>
+        <p style="color:var(--t2);font-size:13px;margin-bottom:24px">입력하신 이메일로 인증 링크를 보냈습니다.<br>메일함을 확인해주세요.</p>
+        <button class="btn btn-p" style="width:100%" onclick="S.page='login';R()">로그인 페이지로 돌아가기</button>
+      </div>
+    </div>`;
+  }
+  const isLogin=S.page==='login';
+  return`<div style="display:flex;justify-content:center;align-items:center;min-height:80vh">
+    <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--rl);padding:40px;width:380px">
+      <div style="text-align:center;margin-bottom:24px">
+        <div style="display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:10px;background:var(--indigo);color:white;font-weight:700;font-size:18px;font-style:italic;margin-bottom:12px">N</div>
+        <h2 style="margin:0;font-size:20px">${isLogin?'로그인':'회원 가입'}</h2>
+        <p style="color:var(--t3);font-size:12px;margin-top:4px">LP Notice Analyzer</p>
+      </div>
+      <div id="authError" style="display:none;background:var(--red-d);color:var(--red);padding:8px 12px;border-radius:6px;font-size:12px;margin-bottom:12px"></div>
+      <div style="margin-bottom:12px">
+        <label style="font-size:12px;color:var(--t2);display:block;margin-bottom:4px">이메일</label>
+        <input id="authEmail" type="email" placeholder="name@company.com" style="width:100%;padding:10px 12px;border:1px solid var(--bdr);border-radius:6px;font-size:14px;box-sizing:border-box;background:var(--bg0)"/>
+      </div>
+      <div style="margin-bottom:${isLogin?'20':'12'}px">
+        <label style="font-size:12px;color:var(--t2);display:block;margin-bottom:4px">비밀번호</label>
+        <input id="authPw" type="password" placeholder="${isLogin?'비밀번호':'8자 이상'}" style="width:100%;padding:10px 12px;border:1px solid var(--bdr);border-radius:6px;font-size:14px;box-sizing:border-box;background:var(--bg0)"
+          onkeydown="if(event.key==='Enter')doAuthSubmit()"/>
+      </div>
+      ${!isLogin?`<div style="margin-bottom:20px">
+        <label style="font-size:12px;color:var(--t2);display:block;margin-bottom:4px">비밀번호 확인</label>
+        <input id="authPw2" type="password" placeholder="비밀번호 재입력" style="width:100%;padding:10px 12px;border:1px solid var(--bdr);border-radius:6px;font-size:14px;box-sizing:border-box;background:var(--bg0)"
+          onkeydown="if(event.key==='Enter')doAuthSubmit()"/>
+      </div>`:''}
+      <button id="authBtn" class="btn btn-p" style="width:100%;padding:10px;font-size:14px" onclick="doAuthSubmit()">${isLogin?'로그인':'가입하기'}</button>
+      <div style="text-align:center;margin-top:16px;font-size:12px;color:var(--t3)">
+        ${isLogin
+          ?'계정이 없으신가요? <a href="#" onclick="S.page=\'register\';R();return false" style="color:var(--indigo);font-weight:600">가입</a>'
+          :'이미 계정이 있나요? <a href="#" onclick="S.page=\'login\';R();return false" style="color:var(--indigo);font-weight:600">로그인</a>'}
+      </div>
+    </div>
+  </div>`;
+}
+
+async function doAuthSubmit(){
+  const email=(document.getElementById('authEmail')?.value||'').trim();
+  const pw=document.getElementById('authPw')?.value||'';
+  const errEl=document.getElementById('authError');
+  const btn=document.getElementById('authBtn');
+  function showErr(msg){if(errEl){errEl.textContent=msg;errEl.style.display='block';}}
+
+  if(!email||!pw){showErr('이메일과 비밀번호를 입력해주세요');return;}
+
+  if(S.page==='register'){
+    const pw2=document.getElementById('authPw2')?.value||'';
+    if(pw.length<8){showErr('비밀번호는 8자 이상이어야 합니다');return;}
+    if(pw!==pw2){showErr('비밀번호가 일치하지 않습니다');return;}
+    if(btn)btn.disabled=true;
+    const res=await doRegister(email,pw);
+    if(btn)btn.disabled=false;
+    if(res.error){showErr(res.error);return;}
+    if(res.needsConfirmation){S.page='verify_email';R();return;}
+    S.page='upload';await loadFromBackend();return;
+  }
+
+  // Login
+  if(btn)btn.disabled=true;
+  const res=await doLogin(email,pw);
+  if(btn)btn.disabled=false;
+  if(res.error){showErr(res.error);return;}
+  S.page='upload';
+  await loadFromBackend();
+}
+
+/* ===== ADMIN PAGE ===== */
+function pgAdmin(){
+  if(!S._adminUsers.length) return`<div style="text-align:center;padding:60px;color:var(--t3)">사용자 목록을 불러오는 중...</div>`;
+  // If viewing a specific user's notices
+  if(S._adminViewUser){
+    const vu=S._adminUsers.find(u=>u.user_id===S._adminViewUser);
+    return`<div class="fi">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <button class="btn btn-sm btn-s" onclick="S._adminViewUser=null;R()">← 목록으로</button>
+        <span style="font-size:14px;font-weight:600">${escH(vu?.email||S._adminViewUser)}의 데이터</span>
+        <span style="font-size:11px;color:var(--t3)">${S.notices.length}건</span>
+      </div>
+      ${S.notices.length?renderAdminNoticeList():'<div style="text-align:center;padding:40px;color:var(--t3)">이 사용자의 Notice가 없습니다</div>'}
+    </div>`;
+  }
+  return`<div class="fi">
+    <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--rl);overflow:hidden">
+      <table class="it" style="width:100%">
+        <thead><tr>
+          <th>이메일</th><th>역할</th><th>가입일</th><th style="text-align:center">Notices</th><th style="text-align:center">관리</th>
+        </tr></thead>
+        <tbody>${S._adminUsers.map(u=>`<tr style="cursor:pointer" onclick="adminViewUser('${u.user_id}')">
+          <td style="font-weight:500">${escH(u.email)}</td>
+          <td><span class="tg ${u.role==='admin'?'tg-c':'tg-d'}" style="border-radius:10px;padding:1px 7px;font-size:10px">${u.role}</span></td>
+          <td style="font-size:11px;color:var(--t3)">${u.created_at?u.created_at.substring(0,10):''}</td>
+          <td style="text-align:center;font-variant-numeric:tabular-nums">${u.notice_count}</td>
+          <td style="text-align:center">
+            ${u.role!=='admin'?`<button class="btn btn-sm" style="font-size:10px;padding:2px 6px;color:var(--red);border-color:var(--red)" onclick="event.stopPropagation();adminDeleteUser('${u.user_id}','${escH(u.email)}')">삭제</button>`:''}
+          </td>
+        </tr>`).join('')}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function renderAdminNoticeList(){
+  const tree=buildTree();
+  return tree.map(fund=>{
+    const allN=[];
+    fund.lps.forEach(lp=>lp.classes.forEach(cls=>cls.notices.forEach(n=>allN.push(n))));
+    return`<div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--rl);margin-bottom:10px;padding:12px 16px">
+      <div style="font-weight:600;margin-bottom:6px">${escH(fund.displayName)} <span style="color:var(--t3);font-size:11px">${allN.length}건</span></div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">${allN.sort((a,b)=>{
+        const da=fmtDate(a.header.issue_date||'');const db=fmtDate(b.header.issue_date||'');return da.localeCompare(db);
+      }).map(n=>{
+        const tp=n.header.notice_type;
+        const bg=tp==='Call'?'var(--indigo-d)':tp==='Distribution'?'var(--emerald-d)':'var(--amber-d)';
+        const col=tp==='Call'?'var(--indigo)':tp==='Distribution'?'var(--emerald)':'var(--amber)';
+        return`<span onclick="viewNotice('${n.id}')" style="padding:3px 8px;border-radius:10px;font-size:11px;background:${bg};color:${col};cursor:pointer" title="${escH(n.header.notice_title||'')}">${fmtDate(n.header.issue_date||'N/A').substring(5)}</span>`;
+      }).join('')}</div>
+    </div>`;
+  }).join('');
+}
+
+async function loadAdminUsers(){
+  try{
+    const r=await authFetch(`${API}/api/admin/users`);
+    if(r.ok) S._adminUsers=await r.json();
+    R();
+  }catch(e){console.warn('Admin users load failed:',e);}
+}
+
+async function adminViewUser(uid){
+  S._adminViewUser=uid;
+  // Load that user's notices
+  try{
+    const r=await authFetch(`${API}/api/admin/users/${uid}/notices`);
+    if(r.ok){
+      const data=await r.json();
+      // Temporarily replace S.notices for rendering
+      S._savedNotices=S.notices;
+      S.notices=data;
+      S.notices.forEach(n=>{normalizeNames(n.header);deriveHeaderFields(n.header);});
+    }
+  }catch(e){console.warn('Admin user notices load failed:',e);}
+  R();
+}
+
+async function adminDeleteUser(uid,email){
+  if(!confirm(`"${email}"의 모든 데이터를 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.`))return;
+  try{
+    await authFetch(`${API}/api/admin/users/${uid}`,{method:'DELETE'});
+    S._adminUsers=S._adminUsers.filter(u=>u.user_id!==uid);
+    R();
+  }catch(e){alert('삭제 실패: '+e.message);}
+}
+
 function pgSettings(){
   const tempPct=((S.geminiTemperature)/2*100).toFixed(0);
   return`<div class="cen fi"><div class="scard" style="max-width:480px">
@@ -786,22 +1077,22 @@ function onTempChange(val){ S.geminiTemperature=parseInt(val)/100; const lbl=doc
 function setTemp(v){ S.geminiTemperature=v; const sl=document.getElementById('geminiTempSlider'); if(sl)sl.value=Math.round(v*100); R(); }
 async function saveGeminiSettings(){
   try{
-    const r=await fetch(`${API}/api/settings`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({gemini_model:S.geminiModel,gemini_temperature:S.geminiTemperature})});
+    const r=await authFetch(`${API}/api/settings`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({gemini_model:S.geminiModel,gemini_temperature:S.geminiTemperature})});
     if(r.ok){const d=await r.json();S.geminiModel=d.gemini_model;S.geminiTemperature=d.gemini_temperature;const msg=document.getElementById('settingsSaveMsg');if(msg){msg.textContent='✓ 저장 완료';setTimeout(()=>{msg.textContent='';},2000);}}
   }catch(e){const msg=document.getElementById('settingsSaveMsg');if(msg)msg.textContent='저장 실패: '+e.message;}
 }
 async function loadGeminiModels(){
-  try{const r=await fetch(`${API}/api/models`);if(r.ok){S.geminiModels=await r.json();}}catch(e){}
+  try{const r=await authFetch(`${API}/api/models`);if(r.ok){S.geminiModels=await r.json();}}catch(e){}
 }
 async function checkBackend(){
   try{
-    const r=await fetch(`${API}/api/health`);
+    const r=await authFetch(`${API}/api/health`);
     const d=await r.json();
     S.connected=d.status==='ok';
     if(S.connected){
       if(S.page==='settings') S.page='upload';
       // Load settings + model list
-      try{const sr=await fetch(`${API}/api/settings`);if(sr.ok){const sd=await sr.json();S.geminiModel=sd.gemini_model;S.geminiTemperature=sd.gemini_temperature;}}catch(e){}
+      try{const sr=await authFetch(`${API}/api/settings`);if(sr.ok){const sd=await sr.json();S.geminiModel=sd.gemini_model;S.geminiTemperature=sd.gemini_temperature;}}catch(e){}
       loadGeminiModels();
     }
   }catch(e){S.connected=false;}
@@ -1322,7 +1613,7 @@ function handleNoticeDrop(e,fundIdx){
   regName(S.nameReg.fund, targetFund.full, targetFund.short);
 
   // Save to backend
-  fetch(`${API}/api/notices/${noticeId}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+  authFetch(`${API}/api/notices/${noticeId}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({Underlying_Fund_Name_full:targetFund.full,Underlying_Fund_Name_short:targetFund.short,Fund_ID_Key:targetIdKey})}).catch(()=>{});
 
   _dragNoticeId=null;
@@ -1430,7 +1721,7 @@ function confirmFundMerge(){
     n.header.Fund_ID_Key=m.tgtIdKey;
     n.header.Underlying_Fund_Name_full=m.tgtFull;
     n.header.Underlying_Fund_Name_short=m.tgtShort;
-    fetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+    authFetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({Fund_ID_Key:m.tgtIdKey, Underlying_Fund_Name_full:m.tgtFull, Underlying_Fund_Name_short:m.tgtShort})}).catch(()=>{});
     count++;
   });
@@ -1569,7 +1860,7 @@ function confirmLpMove(){
   n._statusCache=null;
 
   // Save to backend
-  fetch(`${API}/api/notices/${m.noticeId}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+  authFetch(`${API}/api/notices/${m.noticeId}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(updates)}).catch(()=>{});
 
   S.showLpMove=null;
@@ -2008,7 +2299,7 @@ async function sendQa(){
   setTimeout(()=>{const el=document.getElementById('qaMsgs');if(el)el.scrollTop=el.scrollHeight;},50);
 
   try{
-    const resp=await fetch(`${API}/api/qa`,{method:'POST',headers:{'Content-Type':'application/json'},
+    const resp=await authFetch(`${API}/api/qa`,{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({notice_id:S.activeNoticeId, messages:S.qaMessages.slice(0,-1), question:q})});
     if(!resp.ok) throw new Error(`서버 오류 ${resp.status}`);
     const data=await resp.json();
@@ -2233,11 +2524,11 @@ function toggleEditMode(){
     const n=S.notices.find(x=>x.id===S.activeNoticeId);
     if(n){
       // Save line items
-      fetch(`${API}/api/notices/${n.id}/items`,{method:'PUT',headers:{'Content-Type':'application/json'},
+      authFetch(`${API}/api/notices/${n.id}/items`,{method:'PUT',headers:{'Content-Type':'application/json'},
         body:JSON.stringify(n.lineItems)}).catch(e=>console.warn('Save failed:',e));
       // Save header dates if modified during edit
       if(n._headerDirty){
-        fetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+        authFetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
           body:JSON.stringify({issue_date:n.header.issue_date, due_date:n.header.due_date})}).catch(e=>console.warn('Header save failed:',e));
         delete n._headerDirty;
       }
@@ -3021,7 +3312,7 @@ function aeStartRename(el, fundKey, oldCanonical){
         aiGroups[newName]=aiGroups[oldCanonical];
         delete aiGroups[oldCanonical];
         // Save AI groups
-        fetch(`${API}/api/asset-groups/${encodeURIComponent(fundKey)}`,{
+        authFetch(`${API}/api/asset-groups/${encodeURIComponent(fundKey)}`,{
           method:'PUT', headers:{'Content-Type':'application/json'},
           body:JSON.stringify({groups:aiGroups})
         }).catch(()=>{});
@@ -3073,7 +3364,7 @@ function _aeSaveOverrides(fundKey){
   // Save merged groups to backend
   if(Object.keys(effective).length>0){
     S._assetGroups[fundKey]=effective;
-    fetch(`${API}/api/asset-groups/${encodeURIComponent(fundKey)}`,{
+    authFetch(`${API}/api/asset-groups/${encodeURIComponent(fundKey)}`,{
       method:'PUT', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({groups:effective})
     }).catch(()=>{});
@@ -3104,7 +3395,7 @@ async function runAssetGroupAI(fundKey){
   R();
 
   try{
-    const resp=await fetch(`${API}/api/asset-groups`,{
+    const resp=await authFetch(`${API}/api/asset-groups`,{
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({fund_key:fundKey, asset_names:names, model:S.geminiModel})
@@ -3166,7 +3457,7 @@ async function runAssetGroupAI(fundKey){
 function clearAssetGroups(fundKey){
   delete S._assetGroups[fundKey];
   // Also delete from backend
-  fetch(`${API}/api/asset-groups/${encodeURIComponent(fundKey)}`,{
+  authFetch(`${API}/api/asset-groups/${encodeURIComponent(fundKey)}`,{
     method:'PUT',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({groups:{}})
@@ -3181,7 +3472,7 @@ async function loadAssetGroups(){
   S.notices.forEach(n=>{ const k=getFundKey(n.header); if(k) fundKeys.add(k); });
   for(const fk of fundKeys){
     try{
-      const r=await fetch(`${API}/api/asset-groups/${encodeURIComponent(fk)}`);
+      const r=await authFetch(`${API}/api/asset-groups/${encodeURIComponent(fk)}`);
       if(r.ok){
         const d=await r.json();
         if(d.groups && Object.keys(d.groups).length>0) S._assetGroups[fk]=d.groups;
@@ -3198,7 +3489,7 @@ function toggleWireValue(noticeId, fieldKey, newValue){
   if(!wire) return;
   wire[fieldKey]=newValue;
   // Save to backend
-  fetch(`${API}/api/notices/${noticeId}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+  authFetch(`${API}/api/notices/${noticeId}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({wire_info:n.header.wire_info})}).catch(e=>console.warn('Wire save failed:',e));
   R();
 }
@@ -3677,7 +3968,7 @@ function applyCorrection(){
       }
       if(changed){
         other._statusCache=null;other._statusCacheHash=null;
-        fetch(`${API}/api/notices/${other.id}/items`,{method:'PUT',headers:{'Content-Type':'application/json'},
+        authFetch(`${API}/api/notices/${other.id}/items`,{method:'PUT',headers:{'Content-Type':'application/json'},
           body:JSON.stringify(oi)}).catch(e=>console.warn('Batch save failed:',e));
         batchCount++;
       }
@@ -3703,7 +3994,7 @@ function _applyCorrectionToNotice(n, c){
   }
   n._statusCache=null;n._statusCacheHash=null;
   // Save to backend
-  fetch(`${API}/api/notices/${n.id}/items`,{method:'PUT',headers:{'Content-Type':'application/json'},
+  authFetch(`${API}/api/notices/${n.id}/items`,{method:'PUT',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(n.lineItems)}).catch(e=>console.warn('Save failed:',e));
 }
 
@@ -4058,7 +4349,7 @@ function editFundName(fundIdx, fullName, currentShort){
     if(nKey===fundIdKey){
       n.header.Underlying_Fund_Name_short=trimmed;
       n.header.Underlying_Fund_Name_full=fullName;
-      fetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+      authFetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({Underlying_Fund_Name_short:trimmed, Underlying_Fund_Name_full:fullName})}).catch(()=>{});
     }
   });
@@ -4100,7 +4391,7 @@ function mergeFund(srcFundIdx){
     n.header.Fund_ID_Key=targetFundIdKey;
     n.header.Underlying_Fund_Name_full=targetFullName;
     n.header.Underlying_Fund_Name_short=targetShortName;
-    fetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+    authFetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({Fund_ID_Key:targetFundIdKey, Underlying_Fund_Name_full:targetFullName, Underlying_Fund_Name_short:targetShortName})}).catch(()=>{});
     count++;
   });
@@ -4142,7 +4433,7 @@ function autoMergeDupeFunds(fundIdxs){
       n.header.Fund_ID_Key=targetIdKey;
       n.header.Underlying_Fund_Name_full=target.fullName;
       n.header.Underlying_Fund_Name_short=target.displayName;
-      fetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+      authFetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({Fund_ID_Key:targetIdKey,Underlying_Fund_Name_full:target.fullName,Underlying_Fund_Name_short:target.displayName})}).catch(()=>{});
       count++;
     })));
@@ -4294,7 +4585,7 @@ function _extractDatesFromText(text){
 let _suppressVoidSave=false; // suppress during batch rebuild (loadFromBackend)
 function _saveVoidStatus(n){
   if(_suppressVoidSave) return;
-  fetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+  authFetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({is_voided:true,voided_by:n.voided_by})}).catch(e=>console.warn('Void save failed:',e));
 }
 
@@ -4413,7 +4704,7 @@ function submitLp(){
       updated.push(other.id);
     });
     updated.forEach(id=>{
-      fetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+      authFetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({LP_code:v})}).catch(()=>{});
     });
   } else {
@@ -4431,7 +4722,7 @@ function submitLp(){
       updated.push(other.id);
     });
     updated.forEach(id=>{
-      fetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+      authFetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({LP_Name_full:v, LP_Name_short:shortName})}).catch(()=>{});
     });
   }
@@ -4467,7 +4758,7 @@ function autoFillLp(mode){
       updated.push(other.id);
     });
     updated.forEach(id=>{
-      fetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+      authFetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({LP_Name_full:code, LP_Name_short:code})}).catch(()=>{});
     });
   } else if(mode==='code'){
@@ -4485,7 +4776,7 @@ function autoFillLp(mode){
       updated.push(other.id);
     });
     updated.forEach(id=>{
-      fetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+      authFetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({LP_code:name})}).catch(()=>{});
     });
   }
@@ -4495,7 +4786,7 @@ function autoFillLp(mode){
 
 function deleteNotice(id){
   if(!confirm('이 Notice를 삭제하시겠습니까?'))return;
-  fetch(`${API}/api/notices/${id}`,{method:'DELETE'}).catch(e=>console.warn('Delete failed:',e));
+  authFetch(`${API}/api/notices/${id}`,{method:'DELETE'}).catch(e=>console.warn('Delete failed:',e));
   S.notices=S.notices.filter(n=>n.id!==id);
   if(S.activeNoticeId===id){S.activeNoticeId=S.notices.length?S.notices[S.notices.length-1].id:null;S.page=S.notices.length?'portfolio':'upload';}
   R();
@@ -4585,7 +4876,7 @@ function deleteFund(fi){
   const label=name?name.short||name.full:'이 펀드';
   if(!confirm(`"${label}"의 Notice ${ids.length}건을 모두 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.`)) return;
   ids.forEach(id=>{
-    fetch(`${API}/api/notices/${id}`,{method:'DELETE'}).catch(e=>console.warn('Delete failed:',e));
+    authFetch(`${API}/api/notices/${id}`,{method:'DELETE'}).catch(e=>console.warn('Delete failed:',e));
   });
   const idSet=new Set(ids);
   S.notices=S.notices.filter(n=>!idSet.has(n.id));
@@ -4676,7 +4967,7 @@ async function uploadToBackend(job){
     const abortCtrl=new AbortController();
 
     // Use SSE stream from backend
-    const resp=await fetch(`${API}/api/upload`,{method:'POST',body:formData,signal:abortCtrl.signal});
+    const resp=await authFetch(`${API}/api/upload`,{method:'POST',body:formData,signal:abortCtrl.signal});
     if(!resp.ok){
       const errBody=await resp.text();
       throw new Error(`서버 오류 ${resp.status}: ${errBody.substring(0,200)}`);
@@ -4925,7 +5216,7 @@ async function resolveDuplicate(action){
 
     // Content-based duplicate — use existing resolve endpoint
     try{
-      const resp=await fetch(`${API}/api/notices/${info.newNoticeId}/resolve-duplicate`,{
+      const resp=await authFetch(`${API}/api/notices/${info.newNoticeId}/resolve-duplicate`,{
         method:'PUT', headers:{'Content-Type':'application/json'},
         body:JSON.stringify({action, existing_id:info.existingId})
       });
@@ -5098,7 +5389,7 @@ async function deferMultiLp(){
 
   // Save placeholder to backend
   try{
-    const resp=await fetch(`${API}/api/notices/defer-lp`,{
+    const resp=await authFetch(`${API}/api/notices/defer-lp`,{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         notice_id: ml.noticeId,
@@ -5198,7 +5489,7 @@ async function _doMultiLpParse(job, codes){
     formData.append('lp_codes', JSON.stringify(codes));
     if(S.geminiModel) formData.append('model', S.geminiModel);
 
-    const resp=await fetch(`${API}/api/upload/parse-lp`,{method:'POST',body:formData});
+    const resp=await authFetch(`${API}/api/upload/parse-lp`,{method:'POST',body:formData});
     if(!resp.ok) throw new Error(`서버 오류 ${resp.status}`);
 
     const reader=resp.body.getReader();
@@ -5253,7 +5544,7 @@ async function _doMultiLpParse(job, codes){
           // (parse-lp has already copied PDF files to sub-notice paths)
           // Only delete if at least one LP was successfully parsed
           if(job._deferredNoticeId && evt.notice_ids && evt.notice_ids.length>0){
-            fetch(`${API}/api/notices/${job._deferredNoticeId}`,{method:'DELETE'}).catch(()=>{});
+            authFetch(`${API}/api/notices/${job._deferredNoticeId}`,{method:'DELETE'}).catch(()=>{});
             S.notices=S.notices.filter(n=>n.id!==job._deferredNoticeId);
             console.log(`[DEFER] Cleaned up placeholder ${job._deferredNoticeId}`);
           }
@@ -5283,7 +5574,7 @@ R();
 /* Auto-init: check backend connection */
 (async()=>{
   try{
-    const r=await fetch(`${API}/api/health`);
+    const r=await authFetch(`${API}/api/health`);
     if(r.ok){S.connected=true;if(S.page==='settings')S.page='upload';}
     R();
   }catch(e){S.connected=false;S.page='settings';R();}
