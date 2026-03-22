@@ -2,9 +2,8 @@
 LP Notice Analyzer — Backend Server
 Run: uvicorn main:app --reload --port 8000
 """
-import os, json, sqlite3, base64, io, time, hashlib, asyncio
+import os, json, base64, io, time, hashlib, asyncio
 from pathlib import Path
-from contextlib import contextmanager
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -12,15 +11,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 import httpx
+from supabase import create_client
 
 # ── Config ──────────────────────────────────────────────
 DATA_DIR = Path(__file__).parent / "data"
-DB_PATH = DATA_DIR / "notices.db"
 PDF_DIR = DATA_DIR / "pdfs"
 PAGE_DIR = DATA_DIR / "pages"
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-3-flash-preview"
 GEMINI_TEMPERATURE = 0.1
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 for d in [DATA_DIR, PDF_DIR, PAGE_DIR]:
     d.mkdir(parents=True, exist_ok=True)
@@ -45,61 +46,57 @@ async def serve_app():
         return FileResponse(str(cwd_html), media_type="text/html")
     raise HTTPException(404, f"index.html not found. Checked: {_index_html}, {cwd_html}")
 
-# ── Database ────────────────────────────────────────────
-def init_db():
-    with get_db() as db:
-        db.executescript("""
-        CREATE TABLE IF NOT EXISTS notices (
-            id TEXT PRIMARY KEY,
-            file_name TEXT,
-            analyzed_at TEXT,
-            header TEXT,
-            line_items TEXT,
-            raw_ai_response TEXT,
-            is_voided INTEGER DEFAULT 0,
-            voided_by TEXT,
-            pdf_hash TEXT,
-            page_count INTEGER DEFAULT 0,
-            duplicate_key TEXT,
-            created_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        CREATE TABLE IF NOT EXISTS asset_groups (
-            fund_key TEXT PRIMARY KEY,
-            groups_json TEXT,
-            updated_at TEXT DEFAULT (datetime('now'))
-        );
-        """)
-        # Migration: add duplicate_key if missing
-        cols = [r[1] for r in db.execute("PRAGMA table_info(notices)").fetchall()]
-        if "duplicate_key" not in cols:
-            db.execute("ALTER TABLE notices ADD COLUMN duplicate_key TEXT")
+# ── Database (Supabase) ────────────────────────────────
+_supabase = None
+def get_supa():
+    global _supabase
+    if _supabase is None:
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            raise RuntimeError("SUPABASE_URL and SUPABASE_KEY environment variables must be set")
+        _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        print(f"  [INIT] Supabase connected: {SUPABASE_URL[:40]}...")
+    return _supabase
 
-@contextmanager
-def get_db():
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+def db_get(table, id_val, id_col="id"):
+    r = get_supa().table(table).select("*").eq(id_col, id_val).maybe_single().execute()
+    return r.data
 
-init_db()
+def db_list(table, order_col=None, order_desc=True, **filters):
+    q = get_supa().table(table).select("*")
+    for k, v in filters.items():
+        q = q.eq(k, v)
+    if order_col:
+        q = q.order(order_col, desc=order_desc)
+    return q.execute().data or []
 
-def _get_setting(key: str, default: str = None) -> str:
-    """Read a single setting from DB."""
-    with get_db() as db:
-        r = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+def db_insert(table, data):
+    get_supa().table(table).insert(data).execute()
+
+def db_upsert(table, data):
+    get_supa().table(table).upsert(data).execute()
+
+def db_update(table, data, id_val, id_col="id"):
+    get_supa().table(table).update(data).eq(id_col, id_val).execute()
+
+def db_delete(table, id_val, id_col="id"):
+    get_supa().table(table).delete().eq(id_col, id_val).execute()
+
+def db_find(table, col, val):
+    r = get_supa().table(table).select("*").eq(col, val).limit(1).maybe_single().execute()
+    return r.data
+
+def db_count(table):
+    r = get_supa().table(table).select("id", count="exact").execute()
+    return r.count or 0
+
+print(f"  [INIT] DB: Supabase ({SUPABASE_URL[:30]}...)" if SUPABASE_URL else "  [WARN] SUPABASE_URL not set!")
+
+def _get_setting(key, default=None):
+    r = db_get("settings", key, id_col="key")
     return r["value"] if r else default
 
-def _set_setting(key: str, value: str):
-    """Write a single setting to DB."""
-    with get_db() as db:
-        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+def _set_setting(key, value):
+    db_upsert("settings", {"key": key, "value": value})
 
 
 # ── Duplicate Detection ────────────────────────────────
@@ -156,18 +153,17 @@ def _make_duplicate_key(header: dict) -> str:
 def _find_duplicate(pdf_hash: str, header: dict = None):
     """Check for duplicates. Returns (type, existing_row) or (None, None).
     type: 'exact' (same file bytes) or 'content' (same parsed header fields)."""
-    with get_db() as db:
-        # Phase 1: exact binary match (cheapest — no AI needed)
-        if pdf_hash:
-            r = db.execute("SELECT id, file_name, header FROM notices WHERE pdf_hash=?", (pdf_hash,)).fetchone()
-            if r:
-                return "exact", r
-        # Phase 3: content-based match (after AI parsing)
-        if header:
-            dup_key = _make_duplicate_key(header)
-            r = db.execute("SELECT id, file_name, header FROM notices WHERE duplicate_key=?", (dup_key,)).fetchone()
-            if r:
-                return "content", r
+    # Phase 1: exact binary match (cheapest — no AI needed)
+    if pdf_hash:
+        r = db_find("notices", "pdf_hash", pdf_hash)
+        if r:
+            return "exact", r
+    # Phase 3: content-based match (after AI parsing)
+    if header:
+        dup_key = _make_duplicate_key(header)
+        r = db_find("notices", "duplicate_key", dup_key)
+        if r:
+            return "content", r
     return None, None
 
 
@@ -1244,7 +1240,7 @@ async def upload_notice(
             # Phase 1: exact binary duplicate check (before AI — cost = 0)
             dup_type, dup_row = _find_duplicate(pdf_hash)
             if dup_type == "exact":
-                existing_header = json.loads(dup_row["header"])
+                existing_header = dup_row["header"] if isinstance(dup_row["header"], dict) else json.loads(dup_row["header"])
                 yield f"data: {json.dumps({'stage': 'exact_duplicate', 'existing_id': dup_row['id'], 'existing_file_name': dup_row['file_name'], 'existing_date': existing_header.get('issue_date',''), 'existing_fund': existing_header.get('Underlying_Fund_Name_short',''), 'existing_net': existing_header.get('LP_net_amount')}, ensure_ascii=False)}\n\n"
                 return
 
@@ -1324,7 +1320,7 @@ async def upload_notice(
                     "pdf_hash": pdf_hash, "page_count": pdf_info["page_count"],
                     "duplicate_key": dup_key, "elapsed_ms": elapsed,
                 }
-                existing_header = json.loads(dup_row2["header"])
+                existing_header = dup_row2["header"] if isinstance(dup_row2["header"], dict) else json.loads(dup_row2["header"])
                 yield f"data: {json.dumps({'stage': 'duplicate', 'new_notice_id': notice_id, 'existing_id': dup_row2['id'], 'existing_file_name': dup_row2['file_name'], 'existing_date': existing_header.get('issue_date',''), 'existing_fund': existing_header.get('Underlying_Fund_Name_short',''), 'existing_net': existing_header.get('LP_net_amount'), 'header': header, 'line_items': line_items, 'tokens': gemini_result['tokens'], 'page_count': pdf_info['page_count'], 'elapsed_ms': elapsed}, ensure_ascii=False)}\n\n"
                 return
 
@@ -1347,13 +1343,12 @@ async def upload_notice(
                     print(f"  [WARN] Amount verification failed: {e}")
 
             # Save to DB
-            with get_db() as db:
-                db.execute("""INSERT INTO notices (id, file_name, analyzed_at, header, line_items, raw_ai_response, pdf_hash, page_count, duplicate_key)
-                    VALUES (?,?,datetime('now'),?,?,?,?,?,?)""",
-                    (notice_id, file_name, json.dumps(header, ensure_ascii=False),
-                     json.dumps(line_items, ensure_ascii=False),
-                     gemini_result["raw_text"],
-                     pdf_hash, pdf_info["page_count"], dup_key))
+            db_insert("notices", {
+                    "id": notice_id, "file_name": file_name,
+                    "header": header, "line_items": line_items,
+                    "raw_ai_response": gemini_result["raw_text"],
+                    "pdf_hash": pdf_hash, "page_count": pdf_info["page_count"], "duplicate_key": dup_key
+                })
 
             elapsed = int((time.time() - t0) * 1000)
 
@@ -1397,22 +1392,20 @@ async def resolve_duplicate(new_id: str, body: dict):
         # Delete existing, save new
         if existing_id:
             import shutil
-            with get_db() as db:
-                db.execute("DELETE FROM notices WHERE id=?", (existing_id,))
+            db_delete("notices", existing_id)
             pdf_path = PDF_DIR / f"{existing_id}.pdf"
             if pdf_path.exists(): pdf_path.unlink()
             page_dir = PAGE_DIR / existing_id
             if page_dir.exists(): shutil.rmtree(page_dir)
 
         # Save pending as new notice
-        with get_db() as db:
-            db.execute("""INSERT INTO notices (id, file_name, analyzed_at, header, line_items, raw_ai_response, pdf_hash, page_count, duplicate_key)
-                VALUES (?,?,datetime('now'),?,?,?,?,?,?)""",
-                (pending["notice_id"], pending["file_name"],
-                 json.dumps(pending["header"], ensure_ascii=False),
-                 json.dumps(pending["line_items"], ensure_ascii=False),
-                 pending["raw_text"],
-                 pending["pdf_hash"], pending["page_count"], pending["duplicate_key"]))
+        db_insert("notices", {
+                "id": pending["notice_id"], "file_name": pending["file_name"],
+                "header": pending["header"], "line_items": pending["line_items"],
+                "raw_ai_response": pending["raw_text"],
+                "pdf_hash": pending["pdf_hash"], "page_count": pending["page_count"],
+                "duplicate_key": pending["duplicate_key"]
+            })
 
         return {
             "ok": True, "action": "replaced",
@@ -1429,8 +1422,7 @@ async def reparse_notice(notice_id: str, model: Optional[str] = Query(None)):
     """Re-parse an existing notice from its stored PDF. Updates in-place (same ID).
     Returns SSE stream like /api/upload."""
     # Find existing notice and its PDF
-    with get_db() as db:
-        r = db.execute("SELECT file_name, pdf_hash FROM notices WHERE id=?", (notice_id,)).fetchone()
+    r = db_get("notices", notice_id)
     if not r:
         raise HTTPException(404, "Notice not found in database")
     file_name = r["file_name"]
@@ -1496,15 +1488,12 @@ async def reparse_notice(notice_id: str, model: Optional[str] = Query(None)):
 
             # Update existing notice in-place (same ID — no orphaned files)
             dup_key = _make_duplicate_key(header)
-            with get_db() as db:
-                db.execute("""UPDATE notices SET
-                    analyzed_at=datetime('now'), header=?, line_items=?,
-                    raw_ai_response=?, pdf_hash=?, page_count=?, duplicate_key=?
-                    WHERE id=?""",
-                    (json.dumps(header, ensure_ascii=False),
-                     json.dumps(line_items, ensure_ascii=False),
-                     gemini_result["raw_text"], pdf_hash,
-                     pdf_info["page_count"], dup_key, notice_id))
+            db_update("notices", {
+                    "header": header, "line_items": line_items,
+                    "raw_ai_response": gemini_result["raw_text"],
+                    "pdf_hash": pdf_hash, "page_count": pdf_info["page_count"],
+                    "duplicate_key": dup_key
+                }, notice_id)
 
             elapsed = int((time.time() - t0) * 1000)
             yield f"data: {json.dumps({'stage': 'done', 'notice_id': notice_id, 'header': header, 'line_items': line_items, 'tokens': gemini_result['tokens'], 'page_count': pdf_info['page_count'], 'elapsed_ms': elapsed}, ensure_ascii=False)}\n\n"
@@ -1768,15 +1757,11 @@ async def parse_multi_lp(
                 # sub-notices because sub_id contains a timestamp-based notice_id.
                 dup_key = _make_duplicate_key(header)
                 is_dup = False
-                with get_db() as db:
-                    existing = db.execute(
-                        "SELECT id, file_name FROM notices WHERE duplicate_key=?",
-                        (dup_key,)
-                    ).fetchone()
-                    if existing and existing["id"] != sub_id:
-                        is_dup = True
-                        print(f"  [DUP] LP {lp_code}: content duplicate of "
-                              f"'{existing['file_name']}' ({existing['id']}), skipping")
+                existing = db_find("notices", "duplicate_key", dup_key)
+                if existing and existing["id"] != sub_id:
+                    is_dup = True
+                    print(f"  [DUP] LP {lp_code}: content duplicate of "
+                          f"'{existing['file_name']}' ({existing['id']}), skipping")
                 if is_dup:
                     yield f"data: {json.dumps({'stage': 'lp_done', 'lp_code': lp_code, 'notice_id': existing['id'], 'header': header, 'line_items': line_items, 'tokens': gemini_result['tokens'], 'page_count': page_count, 'progress': f'{i+1}/{len(lp_list)}', 'elapsed_ms': int((time.time()-t0)*1000), 'skipped_duplicate': True}, ensure_ascii=False)}\n\n"
                     completed.append(existing["id"])
@@ -1794,17 +1779,14 @@ async def parse_multi_lp(
 
                 # Save to DB
                 file_label = f"{pdf_path.stem}_LP{lp_code}.pdf"
-                with get_db() as db:
-                    # Delete if re-parsing same LP
-                    db.execute("DELETE FROM notices WHERE id=?", (sub_id,))
-                    db.execute("""INSERT INTO notices (id, file_name, analyzed_at, header, line_items,
-                        raw_ai_response, pdf_hash, page_count, duplicate_key)
-                        VALUES (?,?,datetime('now'),?,?,?,?,?,?)""",
-                        (sub_id, file_label,
-                         json.dumps(header, ensure_ascii=False),
-                         json.dumps(line_items, ensure_ascii=False),
-                         gemini_result["raw_text"],
-                         pdf_hash, page_count, dup_key))
+                try: db_delete("notices", sub_id)
+                except: pass
+                db_insert("notices", {
+                    "id": sub_id, "file_name": file_label,
+                    "header": header, "line_items": line_items,
+                    "raw_ai_response": gemini_result["raw_text"],
+                    "pdf_hash": pdf_hash, "page_count": page_count, "duplicate_key": dup_key
+                })
 
                 elapsed = int((time.time() - t0) * 1000)
                 yield f"data: {json.dumps({'stage': 'lp_done', 'lp_code': lp_code, 'notice_id': sub_id, 'header': header, 'line_items': line_items, 'tokens': gemini_result['tokens'], 'page_count': page_count, 'progress': f'{i+1}/{len(lp_list)}', 'elapsed_ms': elapsed}, ensure_ascii=False)}\n\n"
@@ -1861,15 +1843,12 @@ async def defer_multi_lp(body: dict):
 
     # Save to DB
     pdf_hash = hashlib.md5(pdf_path.read_bytes()[:4096]).hexdigest()[:12]
-    with get_db() as db:
-        db.execute("""INSERT OR REPLACE INTO notices
-            (id, file_name, analyzed_at, header, line_items,
-             raw_ai_response, pdf_hash, page_count, duplicate_key)
-            VALUES (?,?,datetime('now'),?,?,?,?,?,?)""",
-            (notice_id, file_name,
-             json.dumps(header, ensure_ascii=False),
-             json.dumps([], ensure_ascii=False),
-             "", pdf_hash, page_count, ""))
+    db_upsert("notices", {
+        "id": notice_id, "file_name": file_name,
+        "header": header, "line_items": [],
+        "raw_ai_response": "", "pdf_hash": pdf_hash,
+        "page_count": page_count, "duplicate_key": ""
+    })
 
     print(f"  [DEFER] Saved placeholder notice {notice_id}: {file_name} "
           f"({len(investor_ids)} investor IDs)")
@@ -1884,42 +1863,41 @@ async def defer_multi_lp(body: dict):
 
 @app.get("/api/notices")
 async def list_notices():
-    with get_db() as db:
-        rows = db.execute("SELECT id, file_name, analyzed_at, header, line_items, is_voided, voided_by, page_count FROM notices ORDER BY created_at DESC").fetchall()
+    rows = db_list("notices", order_col="created_at", order_desc=True)
     result = []
     for r in rows:
-        header = json.loads(r["header"])
-        _migrate_header_wire(header)  # v1→v2 migration on read
+        header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
+        _migrate_header_wire(header)
+        line_items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
         result.append({
-            "id": r["id"], "fileName": r["file_name"], "analyzedAt": r["analyzed_at"],
-            "header": header, "lineItems": json.loads(r["line_items"]),
-            "is_voided": bool(r["is_voided"]), "voided_by": r["voided_by"],
-            "page_count": r["page_count"],
+            "id": r["id"], "fileName": r.get("file_name",""), "analyzedAt": r.get("analyzed_at"),
+            "header": header, "lineItems": line_items,
+            "is_voided": bool(r.get("is_voided")), "voided_by": r.get("voided_by"),
+            "page_count": r.get("page_count") or 0,
         })
     return result
 
 
 @app.get("/api/notices/{notice_id}")
 async def get_notice(notice_id: str):
-    with get_db() as db:
-        r = db.execute("SELECT * FROM notices WHERE id=?", (notice_id,)).fetchone()
+    r = db_get("notices", notice_id)
     if not r:
         raise HTTPException(404, "Notice not found")
-    header = json.loads(r["header"])
-    _migrate_header_wire(header)  # v1→v2 migration on read
+    header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
+    _migrate_header_wire(header)
+    line_items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
     return {
-        "id": r["id"], "fileName": r["file_name"], "analyzedAt": r["analyzed_at"],
-        "header": header, "lineItems": json.loads(r["line_items"]),
-        "rawAiResponse": r["raw_ai_response"],
-        "is_voided": bool(r["is_voided"]), "voided_by": r["voided_by"],
-        "page_count": r["page_count"],
+        "id": r["id"], "fileName": r.get("file_name",""), "analyzedAt": r.get("analyzed_at"),
+        "header": header, "lineItems": line_items,
+        "rawAiResponse": r.get("raw_ai_response",""),
+        "is_voided": bool(r.get("is_voided")), "voided_by": r.get("voided_by"),
+        "page_count": r.get("page_count") or 0,
     }
 
 
 @app.delete("/api/notices/{notice_id}")
 async def delete_notice(notice_id: str):
-    with get_db() as db:
-        db.execute("DELETE FROM notices WHERE id=?", (notice_id,))
+    db_delete("notices", notice_id)
     # Clean up files
     import shutil
     pdf_path = PDF_DIR / f"{notice_id}.pdf"
@@ -1932,42 +1910,36 @@ async def delete_notice(notice_id: str):
 @app.put("/api/notices/{notice_id}/items/{item_idx}")
 async def update_item(notice_id: str, item_idx: int, updates: dict):
     """Update a single line item (toggle type, commit, etc.)."""
-    with get_db() as db:
-        r = db.execute("SELECT line_items FROM notices WHERE id=?", (notice_id,)).fetchone()
-        if not r: raise HTTPException(404)
-        items = json.loads(r["line_items"])
-        if item_idx < 0 or item_idx >= len(items): raise HTTPException(400, "Invalid index")
-        items[item_idx].update(updates)
-        db.execute("UPDATE notices SET line_items=? WHERE id=?",
-            (json.dumps(items, ensure_ascii=False), notice_id))
+    r = db_get("notices", notice_id)
+    if not r: raise HTTPException(404)
+    items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
+    if item_idx < 0 or item_idx >= len(items): raise HTTPException(400, "Invalid index")
+    items[item_idx].update(updates)
+    db_update("notices", {"line_items": items}, notice_id)
     return {"ok": True, "item": items[item_idx]}
 
 
 @app.put("/api/notices/{notice_id}/header")
 async def update_header(notice_id: str, updates: dict):
     """Update header fields. Also handles is_voided/voided_by (DB columns)."""
-    with get_db() as db:
-        r = db.execute("SELECT header FROM notices WHERE id=?", (notice_id,)).fetchone()
-        if not r: raise HTTPException(404)
-        header = json.loads(r["header"])
-        # Extract DB-column fields before merging into header JSON
-        set_voided = updates.pop("is_voided", None)
-        set_voided_by = updates.pop("voided_by", None)
-        header.update(updates)
-        db.execute("UPDATE notices SET header=? WHERE id=?",
-            (json.dumps(header, ensure_ascii=False), notice_id))
-        if set_voided is not None:
-            db.execute("UPDATE notices SET is_voided=?, voided_by=? WHERE id=?",
-                (1 if set_voided else 0, set_voided_by, notice_id))
+    r = db_get("notices", notice_id)
+    if not r: raise HTTPException(404)
+    header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
+    set_voided = updates.pop("is_voided", None)
+    set_voided_by = updates.pop("voided_by", None)
+    header.update(updates)
+    update_data = {"header": header}
+    if set_voided is not None:
+        update_data["is_voided"] = bool(set_voided)
+        update_data["voided_by"] = set_voided_by
+    db_update("notices", update_data, notice_id)
     return {"ok": True}
 
 
 @app.put("/api/notices/{notice_id}/items")
 async def bulk_update_items(notice_id: str, items: list = Body(...)):
     """Replace all line items (for correction apply)."""
-    with get_db() as db:
-        db.execute("UPDATE notices SET line_items=? WHERE id=?",
-            (json.dumps(items, ensure_ascii=False), notice_id))
+    db_update("notices", {"line_items": items}, notice_id)
     return {"ok": True}
 
 
@@ -2010,11 +1982,10 @@ class QaRequest(BaseModel):
 
 @app.post("/api/qa")
 async def qa_chat(req: QaRequest):
-    with get_db() as db:
-        r = db.execute("SELECT header, line_items FROM notices WHERE id=?", (req.notice_id,)).fetchone()
+    r = db_get("notices", req.notice_id)
     if not r: raise HTTPException(404)
-    header = json.loads(r["header"])
-    items = json.loads(r["line_items"])
+    header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
+    items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
     real_items = [it for it in items if not it.get("is_subtotal")]
 
     ctx = f"""You are an expert LP fund operations assistant. Answer about this notice.
@@ -2288,11 +2259,7 @@ async def create_asset_groups(body: dict):
             # ── Save ──
             yield f"data: {json.dumps({'stage': 'progress', 'pct': 95, 'message': '저장 중...'})}\n\n"
 
-            with get_db() as db:
-                db.execute(
-                    "INSERT OR REPLACE INTO asset_groups (fund_key, groups_json, updated_at) VALUES (?, ?, datetime('now'))",
-                    (fund_key, json.dumps(groups, ensure_ascii=False))
-                )
+            db_upsert("asset_groups", {"fund_key": fund_key, "groups_json": groups})
 
             final_singletons = sum(1 for v in groups.values() if isinstance(v, list) and len(v) == 1)
             final_merged = sum(1 for v in groups.values() if isinstance(v, list) and len(v) > 1)
@@ -2310,13 +2277,12 @@ async def create_asset_groups(body: dict):
 @app.get("/api/asset-groups/{fund_key}")
 async def get_asset_groups(fund_key: str):
     """Retrieve saved asset groups for a fund."""
-    with get_db() as db:
-        r = db.execute("SELECT groups_json, updated_at FROM asset_groups WHERE fund_key=?", (fund_key,)).fetchone()
+    r = db_get("asset_groups", fund_key, id_col="fund_key")
     if not r:
         return {"fund_key": fund_key, "groups": None}
     return {
         "fund_key": fund_key,
-        "groups": json.loads(r["groups_json"]),
+        "groups": r["groups_json"] if isinstance(r["groups_json"], dict) else json.loads(r["groups_json"]),
         "updated_at": r["updated_at"],
     }
 
@@ -2325,11 +2291,7 @@ async def get_asset_groups(fund_key: str):
 async def save_asset_groups(fund_key: str, body: dict):
     """Save/update asset groups for a fund."""
     groups = body.get("groups", {})
-    with get_db() as db:
-        db.execute(
-            "INSERT OR REPLACE INTO asset_groups (fund_key, groups_json, updated_at) VALUES (?, ?, datetime('now'))",
-            (fund_key, json.dumps(groups, ensure_ascii=False))
-        )
+    db_upsert("asset_groups", {"fund_key": fund_key, "groups_json": groups})
     return {"ok": True, "fund_key": fund_key}
 
 
@@ -2339,8 +2301,7 @@ async def health():
     return {"status": "ok", "notices": _count_notices()}
 
 def _count_notices():
-    with get_db() as db:
-        return db.execute("SELECT COUNT(*) as c FROM notices").fetchone()["c"]
+    return db_count("notices")
 
 
 if __name__ == "__main__":
