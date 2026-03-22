@@ -6,7 +6,7 @@ import os, json, base64, io, time, hashlib, asyncio
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
@@ -36,6 +36,10 @@ FRONTEND_DIR = Path(__file__).resolve().parent
 _index_html = FRONTEND_DIR / "index.html"
 print(f"  [INIT] Frontend path: {_index_html} (exists: {_index_html.exists()})")
 
+@app.get("/")
+async def root_redirect():
+    return RedirectResponse(url="/app")
+
 @app.get("/app")
 async def serve_app():
     if _index_html.exists():
@@ -58,8 +62,8 @@ def get_supa():
     return _supabase
 
 def db_get(table, id_val, id_col="id"):
-    r = get_supa().table(table).select("*").eq(id_col, id_val).maybe_single().execute()
-    return r.data
+    r = get_supa().table(table).select("*").eq(id_col, id_val).limit(1).execute()
+    return r.data[0] if r.data else None
 
 def db_list(table, order_col=None, order_desc=True, **filters):
     q = get_supa().table(table).select("*")
@@ -82,8 +86,8 @@ def db_delete(table, id_val, id_col="id"):
     get_supa().table(table).delete().eq(id_col, id_val).execute()
 
 def db_find(table, col, val):
-    r = get_supa().table(table).select("*").eq(col, val).limit(1).maybe_single().execute()
-    return r.data
+    r = get_supa().table(table).select("*").eq(col, val).limit(1).execute()
+    return r.data[0] if r.data else None
 
 def db_count(table):
     r = get_supa().table(table).select("id", count="exact").execute()
