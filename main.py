@@ -31,12 +31,19 @@ app.add_middleware(CORSMiddleware,
     allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # Serve frontend — index.html in same directory as main.py
-FRONTEND_DIR = Path(__file__).parent
+FRONTEND_DIR = Path(__file__).resolve().parent
 _index_html = FRONTEND_DIR / "index.html"
-if _index_html.exists():
-    @app.get("/app")
-    async def serve_app():
+print(f"  [INIT] Frontend path: {_index_html} (exists: {_index_html.exists()})")
+
+@app.get("/app")
+async def serve_app():
+    if _index_html.exists():
         return FileResponse(str(_index_html), media_type="text/html")
+    # Fallback: try current working directory
+    cwd_html = Path.cwd() / "index.html"
+    if cwd_html.exists():
+        return FileResponse(str(cwd_html), media_type="text/html")
+    raise HTTPException(404, f"index.html not found. Checked: {_index_html}, {cwd_html}")
 
 # ── Database ────────────────────────────────────────────
 def init_db():
