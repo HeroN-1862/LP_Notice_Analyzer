@@ -370,18 +370,26 @@ let _session = null; // current session
 let _userRole = 'user'; // 'user' or 'admin'
 
 async function initAuth() {
+  // Step 1: Create Supabase client (plain fetch — no auth needed)
   try {
-    const cfg = await authFetch(`${API}/api/auth/config`).then(r=>r.json());
+    const cfg = await fetch(`${API}/api/auth/config`).then(r=>r.json());
     if (cfg.supabase_url && cfg.supabase_anon_key) {
       _sb = supabase.createClient(cfg.supabase_url, cfg.supabase_anon_key);
-      const { data } = await _sb.auth.getSession();
-      if (data.session) {
-        _session = data.session;
-        await loadUserRole();
-        return true;
-      }
     }
-  } catch(e) { console.warn('Auth init failed:', e); }
+  } catch(e) { console.warn('Auth config failed:', e); }
+
+  if (!_sb) return false;
+
+  // Step 2: Check existing session (returning user)
+  try {
+    const { data } = await _sb.auth.getSession();
+    if (data?.session) {
+      _session = data.session;
+      loadUserRole().catch(()=>{});
+      return true;
+    }
+  } catch(e) { console.warn('Session check:', e.message); }
+
   return false;
 }
 
@@ -1086,7 +1094,7 @@ async function loadGeminiModels(){
 }
 async function checkBackend(){
   try{
-    const r=await authFetch(`${API}/api/health`);
+    const r=await fetch(`${API}/api/health`);
     const d=await r.json();
     S.connected=d.status==='ok';
     if(S.connected){
@@ -5574,7 +5582,7 @@ R();
 /* Auto-init: check backend connection */
 (async()=>{
   try{
-    const r=await authFetch(`${API}/api/health`);
+    const r=await fetch(`${API}/api/health`);
     if(r.ok){S.connected=true;if(S.page==='settings')S.page='upload';}
     R();
   }catch(e){S.connected=false;S.page='settings';R();}
