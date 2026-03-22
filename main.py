@@ -103,6 +103,72 @@ def _set_setting(key, value):
     db_upsert("settings", {"key": key, "value": value})
 
 
+# ── Storage (Supabase Storage) ─────────────────────────
+def store_pdf(notice_id: str, pdf_bytes: bytes):
+    """Save PDF to Supabase Storage."""
+    try:
+        get_supa().storage.from_("pdfs").upload(
+            f"{notice_id}.pdf", pdf_bytes,
+            {"content-type": "application/pdf", "upsert": "true"})
+    except Exception as e:
+        if "Duplicate" in str(e) or "already exists" in str(e):
+            get_supa().storage.from_("pdfs").update(
+                f"{notice_id}.pdf", pdf_bytes,
+                {"content-type": "application/pdf"})
+        else:
+            raise
+
+def load_pdf(notice_id: str) -> bytes:
+    """Load PDF from Supabase Storage. Returns bytes or None."""
+    try:
+        return get_supa().storage.from_("pdfs").download(f"{notice_id}.pdf")
+    except Exception:
+        return None
+
+def pdf_exists(notice_id: str) -> bool:
+    """Check if PDF exists in storage."""
+    return load_pdf(notice_id) is not None
+
+def store_text_map(notice_id: str, text_map: list):
+    """Save text_map.json to Supabase Storage."""
+    data = json.dumps(text_map, ensure_ascii=False).encode("utf-8")
+    try:
+        get_supa().storage.from_("pages").upload(
+            f"{notice_id}/text_map.json", data,
+            {"content-type": "application/json", "upsert": "true"})
+    except Exception as e:
+        if "Duplicate" in str(e) or "already exists" in str(e):
+            get_supa().storage.from_("pages").update(
+                f"{notice_id}/text_map.json", data,
+                {"content-type": "application/json"})
+        else:
+            raise
+
+def load_text_map(notice_id: str) -> list:
+    """Load text_map.json from Supabase Storage. Returns list or []."""
+    try:
+        data = get_supa().storage.from_("pages").download(f"{notice_id}/text_map.json")
+        return json.loads(data.decode("utf-8")) if data else []
+    except Exception:
+        return []
+
+def delete_storage(notice_id: str):
+    """Delete PDF + text_map from Supabase Storage."""
+    try: get_supa().storage.from_("pdfs").remove([f"{notice_id}.pdf"])
+    except: pass
+    try: get_supa().storage.from_("pages").remove([f"{notice_id}/text_map.json"])
+    except: pass
+
+def copy_storage(src_id: str, dst_id: str):
+    """Copy PDF + text_map from one notice to another."""
+    pdf = load_pdf(src_id)
+    if pdf:
+        store_pdf(dst_id, pdf)
+    tm = load_text_map(src_id)
+    if tm:
+        store_text_map(dst_id, tm)
+
+
 # ── Duplicate Detection ────────────────────────────────
 import re as _re
 
@@ -368,14 +434,11 @@ def extract_lp_row_data(pdf_bytes: bytes, lp_code: str) -> dict:
 
 
 def process_pdf_text(pdf_bytes: bytes, notice_id: str) -> dict:
-    """Save PDF, extract text coordinates with pdfplumber.
-    No image generation — PDF.js renders in the browser."""
+    """Save PDF to Supabase Storage, extract text coordinates with pdfplumber."""
     pdf_hash = hashlib.md5(pdf_bytes).hexdigest()[:12]
-    pdf_path = PDF_DIR / f"{notice_id}.pdf"
-    pdf_path.write_bytes(pdf_bytes)
 
-    notice_page_dir = PAGE_DIR / notice_id
-    notice_page_dir.mkdir(exist_ok=True)
+    # Save PDF to Supabase Storage
+    store_pdf(notice_id, pdf_bytes)
 
     result = {"pdf_hash": pdf_hash, "page_count": 0, "pages": []}
 
@@ -445,11 +508,11 @@ def process_pdf_text(pdf_bytes: bytes, notice_id: str) -> dict:
                     print(f"  [WARN] Page {pi+1} extraction failed: {page_err}")
                     continue
         tm_json = json.dumps(text_map, ensure_ascii=False)
-        (notice_page_dir / "text_map.json").write_text(tm_json, encoding="utf-8")
+        store_text_map(notice_id, text_map)
         print(f"  [INFO] Text map: {len(text_map)} items for {notice_id}")
     except Exception as e:
         print(f"[WARN] pdfplumber failed: {e}")
-        (notice_page_dir / "text_map.json").write_text("[]", encoding="utf-8")
+        store_text_map(notice_id, [])
         try:
             import pdfplumber
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -744,17 +807,9 @@ def map_items_to_pdf(line_items: list, notice_id: str, priority_pages: list = No
     item name and amount against the text-map. Uses exclusive greedy assignment
     so that each PDF row is claimed by at most one item.
     """
-    tm_path = PAGE_DIR / notice_id / "text_map.json"
-    if not tm_path.exists():
-        print(f"  [WARN] No text_map.json for {notice_id}, skipping PDF mapping")
-        return line_items
-
-    try:
-        text_map = json.loads(tm_path.read_text(encoding="utf-8"))
-    except Exception:
-        return line_items
-
+    text_map = load_text_map(notice_id)
     if not text_map:
+        print(f"  [WARN] No text_map for {notice_id}, skipping PDF mapping")
         return line_items
 
     # Section-distinguishing keywords get double weight in name matching
@@ -1259,11 +1314,9 @@ async def upload_notice(
 
             # Smart Page Targeting: identify line item pages from text_map
             li_pages = None
-            tm_path = PAGE_DIR / notice_id / "text_map.json"
-            tm_data = []
-            if tm_path.exists():
+            tm_data = load_text_map(notice_id)
+            if tm_data:
                 try:
-                    tm_data = json.loads(tm_path.read_text(encoding="utf-8"))
                     li_pages = identify_line_item_pages(tm_data, pdf_info["page_count"])
                 except Exception as e:
                     print(f"  [WARN] Page identification failed: {e}")
@@ -1385,22 +1438,14 @@ async def resolve_duplicate(new_id: str, body: dict):
 
     if action == "keep_existing":
         # Discard the new upload — clean up files
-        import shutil
-        pdf_path = PDF_DIR / f"{new_id}.pdf"
-        if pdf_path.exists(): pdf_path.unlink()
-        page_dir = PAGE_DIR / new_id
-        if page_dir.exists(): shutil.rmtree(page_dir)
+        delete_storage(new_id)
         return {"ok": True, "action": "kept_existing", "existing_id": existing_id}
 
     elif action == "replace_with_new" and pending:
         # Delete existing, save new
         if existing_id:
-            import shutil
             db_delete("notices", existing_id)
-            pdf_path = PDF_DIR / f"{existing_id}.pdf"
-            if pdf_path.exists(): pdf_path.unlink()
-            page_dir = PAGE_DIR / existing_id
-            if page_dir.exists(): shutil.rmtree(page_dir)
+            delete_storage(existing_id)
 
         # Save pending as new notice
         db_insert("notices", {
@@ -1430,11 +1475,9 @@ async def reparse_notice(notice_id: str, model: Optional[str] = Query(None)):
     if not r:
         raise HTTPException(404, "Notice not found in database")
     file_name = r["file_name"]
-    pdf_path = PDF_DIR / f"{notice_id}.pdf"
-    if not pdf_path.exists():
-        raise HTTPException(404, f"PDF file not found on disk: {notice_id}.pdf")
-
-    pdf_bytes = pdf_path.read_bytes()
+    pdf_bytes = load_pdf(notice_id)
+    if not pdf_bytes:
+        raise HTTPException(404, f"PDF file not found in storage: {notice_id}")
 
     async def sse_stream():
         t0 = time.time()
@@ -1448,12 +1491,11 @@ async def reparse_notice(notice_id: str, model: Optional[str] = Query(None)):
             pdf_info = await asyncio.to_thread(process_pdf_text, pdf_bytes, notice_id)
 
             # Load text_map
-            tm_path = PAGE_DIR / notice_id / "text_map.json"
-            tm_data = []
+            tm_data = load_text_map(notice_id)
             li_pages = None
-            if tm_path.exists():
+            if tm_data:
                 try:
-                    tm_data = json.loads(tm_path.read_text(encoding="utf-8"))
+                    pass  # tm_data already loaded
                     li_pages = identify_line_item_pages(tm_data, pdf_info["page_count"])
                 except Exception as e:
                     print(f"  [WARN] Page identification failed: {e}")
@@ -1576,23 +1618,15 @@ async def parse_multi_lp(
     if not lp_list:
         raise HTTPException(400, "No LP codes provided")
 
-    pdf_path = PDF_DIR / f"{notice_id}.pdf"
-    if not pdf_path.exists():
+    pdf_bytes = load_pdf(notice_id)
+    if not pdf_bytes:
         raise HTTPException(404, f"PDF not found for {notice_id}")
 
-    pdf_bytes = pdf_path.read_bytes()
     pdf_b64 = base64.b64encode(pdf_bytes).decode()
     pdf_hash = hashlib.md5(pdf_bytes).hexdigest()[:12]
 
     # Load text_map (already generated during upload)
-    tm_path = PAGE_DIR / notice_id / "text_map.json"
-    tm_data = []
-    page_count = 0
-    if tm_path.exists():
-        try:
-            tm_data = json.loads(tm_path.read_text(encoding="utf-8"))
-        except:
-            pass
+    tm_data = load_text_map(notice_id)
     # Get page count
     try:
         import pdfplumber
@@ -1651,14 +1685,7 @@ async def parse_multi_lp(
 
                 # Copy PDF & text_map for sub-notice
                 import shutil
-                sub_pdf = PDF_DIR / f"{sub_id}.pdf"
-                if not sub_pdf.exists():
-                    shutil.copy2(pdf_path, sub_pdf)
-                sub_page_dir = PAGE_DIR / sub_id
-                sub_page_dir.mkdir(exist_ok=True)
-                sub_tm = sub_page_dir / "text_map.json"
-                if not sub_tm.exists() and tm_path.exists():
-                    shutil.copy2(tm_path, sub_tm)
+                copy_storage(notice_id, sub_id)
 
                 # ── Verification & PDF location mapping — scoped to LP row ──
                 if lp_row["found"] and tm_data:
@@ -1770,19 +1797,11 @@ async def parse_multi_lp(
                     yield f"data: {json.dumps({'stage': 'lp_done', 'lp_code': lp_code, 'notice_id': existing['id'], 'header': header, 'line_items': line_items, 'tokens': gemini_result['tokens'], 'page_count': page_count, 'progress': f'{i+1}/{len(lp_list)}', 'elapsed_ms': int((time.time()-t0)*1000), 'skipped_duplicate': True}, ensure_ascii=False)}\n\n"
                     completed.append(existing["id"])
                     # Clean up copied files for this sub_id since we're not saving
-                    import shutil as _sh
-                    _sub_pdf = PDF_DIR / f"{sub_id}.pdf"
-                    if _sub_pdf.exists():
-                        try: _sub_pdf.unlink()
-                        except: pass
-                    _sub_pg = PAGE_DIR / sub_id
-                    if _sub_pg.exists():
-                        try: _sh.rmtree(_sub_pg)
-                        except: pass
+                    delete_storage(sub_id)
                     continue  # Skip to next LP code
 
                 # Save to DB
-                file_label = f"{pdf_path.stem}_LP{lp_code}.pdf"
+                file_label = f"{notice_id}_LP{lp_code}.pdf"
                 try: db_delete("notices", sub_id)
                 except: pass
                 db_insert("notices", {
@@ -1822,9 +1841,8 @@ async def defer_multi_lp(body: dict):
     investor_ids = body.get("investor_ids", [])
     page_count = body.get("page_count", 0)
 
-    # Verify PDF exists on disk
-    pdf_path = PDF_DIR / f"{notice_id}.pdf"
-    if not pdf_path.exists():
+    # Verify PDF exists in storage
+    if not load_pdf(notice_id):
         raise HTTPException(404, f"PDF not found for {notice_id}")
 
     # Build placeholder header
@@ -1846,7 +1864,8 @@ async def defer_multi_lp(body: dict):
     }
 
     # Save to DB
-    pdf_hash = hashlib.md5(pdf_path.read_bytes()[:4096]).hexdigest()[:12]
+    _pdf_for_hash = load_pdf(notice_id)
+    pdf_hash = hashlib.md5(_pdf_for_hash[:4096]).hexdigest()[:12] if _pdf_for_hash else ""
     db_upsert("notices", {
         "id": notice_id, "file_name": file_name,
         "header": header, "line_items": [],
@@ -1902,12 +1921,7 @@ async def get_notice(notice_id: str):
 @app.delete("/api/notices/{notice_id}")
 async def delete_notice(notice_id: str):
     db_delete("notices", notice_id)
-    # Clean up files
-    import shutil
-    pdf_path = PDF_DIR / f"{notice_id}.pdf"
-    if pdf_path.exists(): pdf_path.unlink()
-    page_dir = PAGE_DIR / notice_id
-    if page_dir.exists(): shutil.rmtree(page_dir)
+    delete_storage(notice_id)
     return {"ok": True}
 
 
@@ -1953,17 +1967,7 @@ async def bulk_update_items(notice_id: str, items: list = Body(...)):
 
 @app.get("/api/notices/{notice_id}/text-map")
 async def get_text_map(notice_id: str, page: Optional[int] = None):
-    tm_path = PAGE_DIR / notice_id / "text_map.json"
-    if not tm_path.exists():
-        return []  # Return empty array instead of 404
-    try:
-        raw = tm_path.read_text(encoding="utf-8")
-        if not raw.strip():
-            return []
-        text_map = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        print(f"[WARN] text_map.json read error for {notice_id}: {e}")
-        return []
+    text_map = load_text_map(notice_id)
     if page:
         text_map = [t for t in text_map if t["p"] == page]
     return text_map
@@ -1971,10 +1975,11 @@ async def get_text_map(notice_id: str, page: Optional[int] = None):
 
 @app.get("/api/notices/{notice_id}/pdf")
 async def get_pdf(notice_id: str):
-    pdf_path = PDF_DIR / f"{notice_id}.pdf"
-    if not pdf_path.exists():
+    pdf_bytes = load_pdf(notice_id)
+    if not pdf_bytes:
         raise HTTPException(404, "PDF not found")
-    return FileResponse(str(pdf_path), media_type="application/pdf")
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf",
+        headers={"Content-Disposition": f"inline; filename={notice_id}.pdf"})
 
 
 # ── AI Q&A ──────────────────────────────────────────────
