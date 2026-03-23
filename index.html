@@ -552,7 +552,7 @@ async function loadFromBackend(){
     // Admin: load org list for portfolio cards + upload selector
     if(_userRole==='admin') loadAdminOrgs();
     R();
-  }catch(e){console.warn('Backend load failed:',e);}
+  }catch(e){console.warn('Backend load failed:',e);R();}
 }
 
 function saveState(){/* No-op: backend persists on write */}
@@ -587,6 +587,7 @@ function clearStorage(){
   const authed = await initAuth();
   if (authed) {
     S.page = 'upload';
+    R();  // Show upload page immediately
     await loadFromBackend();
   } else {
     S.page = 'login';
@@ -980,7 +981,7 @@ async function doAuthSubmit(){
       const orgBody=orgSel==='_custom'?{org_name:orgCustom}:{org_id:orgSel};
       await authFetch(`${API}/api/auth/register-org`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(orgBody)});
     }catch(e){console.warn('Org registration:',e);}
-    S.page='upload';await loadFromBackend();return;
+    S.page='upload';R();await loadFromBackend();return;
   }
 
   // Login
@@ -989,6 +990,7 @@ async function doAuthSubmit(){
   if(btn)btn.disabled=false;
   if(res.error){showErr(res.error);return;}
   S.page='upload';
+  R();  // Show upload page immediately before loading data
   await loadFromBackend();
 }
 
