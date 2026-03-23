@@ -14,18 +14,12 @@ import httpx
 from supabase import create_client
 
 # ── Config ──────────────────────────────────────────────
-DATA_DIR = Path(__file__).parent / "data"
-PDF_DIR = DATA_DIR / "pdfs"
-PAGE_DIR = DATA_DIR / "pages"
 GEMINI_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-3-flash-preview"
 GEMINI_TEMPERATURE = 0.1
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
-
-for d in [DATA_DIR, PDF_DIR, PAGE_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
 
 # ── App ─────────────────────────────────────────────────
 app = FastAPI(title="LP Notice Analyzer API")
@@ -101,12 +95,30 @@ def db_count(table):
 
 print(f"  [INIT] DB: Supabase ({SUPABASE_URL[:30]}...)" if SUPABASE_URL else "  [WARN] SUPABASE_URL not set!")
 
-def _get_setting(key, default=None):
-    r = db_get("settings", key, id_col="key")
-    return r["value"] if r else default
+def _get_setting(key, default=None, user_id=None):
+    q = get_supa().table("settings").select("*").eq("key", key)
+    if user_id:
+        q = q.eq("user_id", user_id)
+    r = q.limit(1).execute()
+    return r.data[0]["value"] if r.data else default
 
-def _set_setting(key, value):
-    db_upsert("settings", {"key": key, "value": value})
+def _set_setting(key, value, user_id=None):
+    # Find existing row with this key+user_id
+    q = get_supa().table("settings").select("*").eq("key", key)
+    if user_id:
+        q = q.eq("user_id", user_id)
+    existing = q.limit(1).execute()
+    if existing.data:
+        # Update existing
+        uq = get_supa().table("settings").update({"value": value}).eq("key", key)
+        if user_id:
+            uq = uq.eq("user_id", user_id)
+        uq.execute()
+    else:
+        data = {"key": key, "value": value}
+        if user_id:
+            data["user_id"] = user_id
+        get_supa().table("settings").insert(data).execute()
 
 
 # ── Storage (Supabase Storage) ─────────────────────────
@@ -687,11 +699,11 @@ Each element: {"intermediary_bank_name":"","intermediary_bank_address":"","inter
 If no wire instructions found, return "wire_info":[] in header. Do NOT infer direction — only extract bank details as written."""
 
 
-async def call_gemini(pdf_b64: str, model: str = None, temperature: float = None, custom_prompt: str = None) -> dict:
+async def call_gemini(pdf_b64: str, model: str = None, temperature: float = None, custom_prompt: str = None, user_id: str = None) -> dict:
     """Call Gemini API with PDF and return parsed result."""
-    model = model or _get_setting("gemini_model", GEMINI_MODEL)
+    model = model or _get_setting("gemini_model", GEMINI_MODEL, user_id=user_id)
     if temperature is None:
-        temperature = float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE)))
+        temperature = float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), user_id=user_id))
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
 
     prompt = custom_prompt or ANALYSIS_PROMPT
@@ -1391,7 +1403,7 @@ async def upload_notice(
 
             # Call Gemini with heartbeat — send periodic SSE events so frontend
             # can distinguish "still waiting for API" from "connection dead"
-            gemini_task = asyncio.create_task(call_gemini(pdf_b64, model))
+            gemini_task = asyncio.create_task(call_gemini(pdf_b64, model, user_id=user["id"]))
             HEARTBEAT_SEC = 10
             hb_count = 0
             while not gemini_task.done():
@@ -1569,7 +1581,7 @@ async def reparse_notice(notice_id: str, request: Request, model: Optional[str] 
 
             yield f"data: {json.dumps({'stage': 'parsing'})}\n\n"
 
-            gemini_task = asyncio.create_task(call_gemini(pdf_b64, model))
+            gemini_task = asyncio.create_task(call_gemini(pdf_b64, model, user_id=user["id"]))
             hb_count = 0
             while not gemini_task.done():
                 try:
@@ -1729,7 +1741,7 @@ async def parse_multi_lp(
                           f"using visual fallback prompt")
 
                 # ── Call Gemini with heartbeat ──
-                gemini_task = asyncio.create_task(call_gemini(pdf_b64, model, custom_prompt=targeted_prompt))
+                gemini_task = asyncio.create_task(call_gemini(pdf_b64, model, custom_prompt=targeted_prompt, user_id=user["id"]))
                 hb_count = 0
                 while not gemini_task.done():
                     try:
@@ -1746,7 +1758,6 @@ async def parse_multi_lp(
                 header["LP_code"] = lp_code
 
                 # Copy PDF & text_map for sub-notice
-                import shutil
                 copy_storage(notice_id, sub_id)
 
                 # ── Verification & PDF location mapping — scoped to LP row ──
@@ -2100,8 +2111,9 @@ Answer in the user's language. Be concise."""
         messages.append({"role": "user" if m["role"]=="user" else "model", "parts": [{"text": m["text"]}]})
     messages.append({"role": "user", "parts": [{"text": req.question}]})
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{_get_setting('gemini_model', GEMINI_MODEL)}:generateContent?key={GEMINI_KEY}"
-    qa_temp = float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE))) + 0.2  # slightly higher for chat
+    uid = user["id"]
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{_get_setting('gemini_model', GEMINI_MODEL, user_id=uid)}:generateContent?key={GEMINI_KEY}"
+    qa_temp = float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), user_id=uid)) + 0.2  # slightly higher for chat
     qa_temp = min(qa_temp, 2.0)
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(url, json={
@@ -2137,21 +2149,26 @@ async def list_models(request: Request):
 @app.get("/api/settings")
 async def get_settings(request: Request):
     user = await get_current_user(request)
-    """Return all AI-related settings."""
+    """Return all AI-related settings (per-user)."""
+    uid = user["id"]
     return {
-        "gemini_model": _get_setting("gemini_model", GEMINI_MODEL),
-        "gemini_temperature": float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE))),
+        "gemini_model": _get_setting("gemini_model", GEMINI_MODEL, user_id=uid),
+        "gemini_temperature": float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), user_id=uid)),
     }
 
 @app.put("/api/settings")
 async def update_settings(body: dict, request: Request):
     user = await get_current_user(request)
-    """Update AI-related settings."""
+    """Update AI-related settings (per-user)."""
+    uid = user["id"]
     allowed = {"gemini_model", "gemini_temperature"}
     for k, v in body.items():
         if k in allowed:
-            _set_setting(k, str(v))
-    return await get_settings()
+            _set_setting(k, str(v), user_id=uid)
+    return {
+        "gemini_model": _get_setting("gemini_model", GEMINI_MODEL, user_id=uid),
+        "gemini_temperature": float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), user_id=uid)),
+    }
 
 
 # ── Asset Groups (AI-based grouping) ──────────────────
@@ -2233,9 +2250,9 @@ def _parse_gemini_json(raw_text: str) -> dict:
     return json.loads(js[bs:be+1])
 
 
-async def _call_gemini_text(prompt: str, model: str = None, temperature: float = None) -> str:
+async def _call_gemini_text(prompt: str, model: str = None, temperature: float = None, user_id: str = None) -> str:
     """Call Gemini with text-only prompt, return raw text response."""
-    _model = model or _get_setting("gemini_model", GEMINI_MODEL)
+    _model = model or _get_setting("gemini_model", GEMINI_MODEL, user_id=user_id)
     _temp = temperature if temperature is not None else ASSET_GROUP_TEMPERATURE
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{_model}:generateContent?key={GEMINI_KEY}"
     payload = {
@@ -2270,7 +2287,7 @@ async def create_asset_groups(body: dict, request: Request):
             prompt1 = ASSET_GROUP_PROMPT_PASS1 + names_text
 
             # Call with heartbeat
-            gemini_task = asyncio.create_task(_call_gemini_text(prompt1, model))
+            gemini_task = asyncio.create_task(_call_gemini_text(prompt1, model, user_id=user["id"]))
             hb_count = 0
             while not gemini_task.done():
                 try:
@@ -2313,7 +2330,7 @@ async def create_asset_groups(body: dict, request: Request):
 
                 prompt2 = ASSET_GROUP_PROMPT_PASS2.replace("{existing_groups}", existing_desc).replace("{singletons}", singleton_list)
 
-                gemini_task2 = asyncio.create_task(_call_gemini_text(prompt2, model))
+                gemini_task2 = asyncio.create_task(_call_gemini_text(prompt2, model, user_id=user["id"]))
                 hb_count2 = 0
                 while not gemini_task2.done():
                     try:
@@ -2354,10 +2371,15 @@ async def create_asset_groups(body: dict, request: Request):
             else:
                 yield f"data: {json.dumps({'stage': 'progress', 'pct': 92, 'message': 'Pass 2 불필요 (singleton 부족)'})}\n\n"
 
-            # ── Save ──
+            # ── Save (per-user) ──
             yield f"data: {json.dumps({'stage': 'progress', 'pct': 95, 'message': '저장 중...'})}\n\n"
 
-            db_upsert("asset_groups", {"fund_key": fund_key, "groups_json": groups})
+            uid = user["id"]
+            existing_ag = get_supa().table("asset_groups").select("fund_key").eq("fund_key", fund_key).eq("user_id", uid).limit(1).execute()
+            if existing_ag.data:
+                get_supa().table("asset_groups").update({"groups_json": groups}).eq("fund_key", fund_key).eq("user_id", uid).execute()
+            else:
+                get_supa().table("asset_groups").insert({"fund_key": fund_key, "groups_json": groups, "user_id": uid}).execute()
 
             final_singletons = sum(1 for v in groups.values() if isinstance(v, list) and len(v) == 1)
             final_merged = sum(1 for v in groups.values() if isinstance(v, list) and len(v) > 1)
@@ -2375,23 +2397,31 @@ async def create_asset_groups(body: dict, request: Request):
 @app.get("/api/asset-groups/{fund_key}")
 async def get_asset_groups(fund_key: str, request: Request):
     user = await get_current_user(request)
-    """Retrieve saved asset groups for a fund."""
-    r = db_get("asset_groups", fund_key, id_col="fund_key")
-    if not r:
+    """Retrieve saved asset groups for a fund (per-user)."""
+    uid = user["id"]
+    r = get_supa().table("asset_groups").select("*").eq("fund_key", fund_key).eq("user_id", uid).limit(1).execute()
+    row = r.data[0] if r.data else None
+    if not row:
         return {"fund_key": fund_key, "groups": None}
     return {
         "fund_key": fund_key,
-        "groups": r["groups_json"] if isinstance(r["groups_json"], dict) else json.loads(r["groups_json"]),
-        "updated_at": r["updated_at"],
+        "groups": row["groups_json"] if isinstance(row["groups_json"], dict) else json.loads(row["groups_json"]),
+        "updated_at": row["updated_at"],
     }
 
 
 @app.put("/api/asset-groups/{fund_key}")
 async def save_asset_groups(fund_key: str, body: dict, request: Request):
     user = await get_current_user(request)
-    """Save/update asset groups for a fund."""
+    """Save/update asset groups for a fund (per-user)."""
+    uid = user["id"]
     groups = body.get("groups", {})
-    db_upsert("asset_groups", {"fund_key": fund_key, "groups_json": groups})
+    # Check if row exists for this user+fund
+    existing = get_supa().table("asset_groups").select("fund_key").eq("fund_key", fund_key).eq("user_id", uid).limit(1).execute()
+    if existing.data:
+        get_supa().table("asset_groups").update({"groups_json": groups}).eq("fund_key", fund_key).eq("user_id", uid).execute()
+    else:
+        get_supa().table("asset_groups").insert({"fund_key": fund_key, "groups_json": groups, "user_id": uid}).execute()
     return {"ok": True, "fund_key": fund_key}
 
 

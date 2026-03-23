@@ -2100,10 +2100,12 @@ async function pdfRenderPage(pageNum){
 
   try{
     await window._pdfjsReady;
-    // Load PDF document (cache it)
+    // Load PDF document (cache it) — use authFetch for JWT token
     if(!_pdfDoc || _pdfDoc._noticeId !== _pdfNoticeId){
-      const url = `${API}/api/notices/${_pdfNoticeId}/pdf`;
-      _pdfDoc = await pdfjsLib.getDocument(url).promise;
+      const resp = await authFetch(`${API}/api/notices/${_pdfNoticeId}/pdf`);
+      if(!resp.ok) throw new Error(`PDF fetch failed: ${resp.status}`);
+      const buf = await resp.arrayBuffer();
+      _pdfDoc = await pdfjsLib.getDocument({data: buf}).promise;
       _pdfDoc._noticeId = _pdfNoticeId;
       _pdfPageCount = _pdfDoc.numPages;
     }
