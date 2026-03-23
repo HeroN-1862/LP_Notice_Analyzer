@@ -95,29 +95,27 @@ def db_count(table):
 
 print(f"  [INIT] DB: Supabase ({SUPABASE_URL[:30]}...)" if SUPABASE_URL else "  [WARN] SUPABASE_URL not set!")
 
-def _get_setting(key, default=None, user_id=None):
+def _get_setting(key, default=None, org_id=None):
     q = get_supa().table("settings").select("*").eq("key", key)
-    if user_id:
-        q = q.eq("user_id", user_id)
+    if org_id:
+        q = q.eq("org_id", org_id)
     r = q.limit(1).execute()
     return r.data[0]["value"] if r.data else default
 
-def _set_setting(key, value, user_id=None):
-    # Find existing row with this key+user_id
+def _set_setting(key, value, org_id=None):
     q = get_supa().table("settings").select("*").eq("key", key)
-    if user_id:
-        q = q.eq("user_id", user_id)
+    if org_id:
+        q = q.eq("org_id", org_id)
     existing = q.limit(1).execute()
     if existing.data:
-        # Update existing
         uq = get_supa().table("settings").update({"value": value}).eq("key", key)
-        if user_id:
-            uq = uq.eq("user_id", user_id)
+        if org_id:
+            uq = uq.eq("org_id", org_id)
         uq.execute()
     else:
         data = {"key": key, "value": value}
-        if user_id:
-            data["user_id"] = user_id
+        if org_id:
+            data["org_id"] = org_id
         get_supa().table("settings").insert(data).execute()
 
 
@@ -189,7 +187,7 @@ def copy_storage(src_id: str, dst_id: str):
 
 # ── Authentication ─────────────────────────────────────
 async def get_current_user(request: Request):
-    """Extract and verify JWT from Authorization header. Returns dict with id, email."""
+    """Extract and verify JWT. Returns dict with id, email, org_id, role."""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(401, "Not authenticated")
@@ -199,40 +197,55 @@ async def get_current_user(request: Request):
         u = user_resp.user
         if not u:
             raise HTTPException(401, "Invalid token")
-        # Auto-register in user_roles on first API call
+        # Auto-register in user_roles on first API call (no org yet)
         existing = db_get("user_roles", u.id, id_col="user_id")
         if not existing:
-            db_insert("user_roles", {"user_id": u.id, "email": u.email, "role": "user"})
+            db_insert("user_roles", {"user_id": u.id, "email": u.email, "role": "uploader"})
             print(f"  [AUTH] New user registered: {u.email} ({u.id})")
-        return {"id": u.id, "email": u.email}
+            existing = {"user_id": u.id, "email": u.email, "role": "uploader", "org_id": None}
+        return {
+            "id": u.id,
+            "email": u.email,
+            "org_id": existing.get("org_id"),
+            "role": existing.get("role", "uploader"),
+        }
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(401, f"Authentication failed: {str(e)[:100]}")
 
-async def get_user_role(user_id: str) -> str:
-    """Get user role from user_roles table. Returns 'admin' or 'user'."""
-    r = db_get("user_roles", user_id, id_col="user_id")
-    return r["role"] if r else "user"
+def is_admin(user: dict) -> bool:
+    return user.get("role") == "admin"
+
+def require_uploader(user: dict):
+    """Raise 403 if viewer."""
+    if user.get("role") == "viewer":
+        raise HTTPException(403, "열람 전용 계정입니다")
 
 async def require_admin(request: Request):
     """Verify user is admin. Returns user dict."""
     user = await get_current_user(request)
-    role = await get_user_role(user["id"])
-    if role != "admin":
+    if user["role"] != "admin":
         raise HTTPException(403, "Admin access required")
-    user["role"] = "admin"
     return user
 
 async def check_notice_access(notice_id: str, user: dict):
-    """Check if user owns the notice (or is admin). Returns notice DB row."""
+    """Check if user's org owns the notice (or is admin). Returns notice DB row."""
     r = db_get("notices", notice_id)
     if not r:
         raise HTTPException(404, "Notice not found")
-    role = await get_user_role(user["id"])
-    if role != "admin" and r.get("user_id") and r["user_id"] != user["id"]:
+    if is_admin(user):
+        return r
+    if r.get("org_id") and r["org_id"] != user.get("org_id"):
         raise HTTPException(403, "Access denied")
     return r
+
+def _get_target_org(user: dict, form_org_id: str = None) -> str:
+    """Determine which org_id to use for saving data.
+    Admin can specify org_id; normal users use their own."""
+    if is_admin(user) and form_org_id:
+        return form_org_id
+    return user.get("org_id") or ""
 
 
 # ── Duplicate Detection ────────────────────────────────
@@ -286,24 +299,21 @@ def _make_duplicate_key(header: dict) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
-def _find_duplicate(pdf_hash: str, header: dict = None, user_id: str = None):
-    """Check for duplicates within the same user's notices.
-    Returns (type, existing_row) or (None, None).
-    type: 'exact' (same file bytes) or 'content' (same parsed header fields)."""
-    # Phase 1: exact binary match (cheapest — no AI needed)
+def _find_duplicate(pdf_hash: str, header: dict = None, org_id: str = None):
+    """Check for duplicates within the same organization's notices.
+    Returns (type, existing_row) or (None, None)."""
     if pdf_hash:
         q = get_supa().table("notices").select("*").eq("pdf_hash", pdf_hash)
-        if user_id:
-            q = q.eq("user_id", user_id)
+        if org_id:
+            q = q.eq("org_id", org_id)
         r = q.limit(1).execute()
         if r.data:
             return "exact", r.data[0]
-    # Phase 3: content-based match (after AI parsing)
     if header:
         dup_key = _make_duplicate_key(header)
         q = get_supa().table("notices").select("*").eq("duplicate_key", dup_key)
-        if user_id:
-            q = q.eq("user_id", user_id)
+        if org_id:
+            q = q.eq("org_id", org_id)
         r = q.limit(1).execute()
         if r.data:
             return "content", r.data[0]
@@ -706,11 +716,11 @@ Each element: {"intermediary_bank_name":"","intermediary_bank_address":"","inter
 If no wire instructions found, return "wire_info":[] in header. Do NOT infer direction — only extract bank details as written."""
 
 
-async def call_gemini(pdf_b64: str, model: str = None, temperature: float = None, custom_prompt: str = None, user_id: str = None) -> dict:
+async def call_gemini(pdf_b64: str, model: str = None, temperature: float = None, custom_prompt: str = None, org_id: str = None) -> dict:
     """Call Gemini API with PDF and return parsed result."""
-    model = model or _get_setting("gemini_model", GEMINI_MODEL, user_id=user_id)
+    model = model or _get_setting("gemini_model", GEMINI_MODEL, org_id=org_id)
     if temperature is None:
-        temperature = float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), user_id=user_id))
+        temperature = float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), org_id=org_id))
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
 
     prompt = custom_prompt or ANALYSIS_PROMPT
@@ -1354,11 +1364,14 @@ class UploadResponse(BaseModel):
 async def upload_notice(
     request: Request,
     file: UploadFile = File(...),
-    model: Optional[str] = Form(None)
+    model: Optional[str] = Form(None),
+    org_id: Optional[str] = Form(None)
 ):
     """Upload PDF, parse with Gemini, process PDF pages.
     Returns SSE stream with stage events: received → parsing → done/duplicate/error."""
     user = await get_current_user(request)
+    require_uploader(user)
+    target_org = _get_target_org(user, org_id)
     pdf_bytes = await file.read()
     file_name = file.filename
 
@@ -1372,7 +1385,7 @@ async def upload_notice(
             pdf_hash = hashlib.md5(pdf_bytes).hexdigest()[:12]
 
             # Phase 1: exact binary duplicate check (before AI — cost = 0)
-            dup_type, dup_row = _find_duplicate(pdf_hash, user_id=user["id"])
+            dup_type, dup_row = _find_duplicate(pdf_hash, org_id=target_org)
             if dup_type == "exact":
                 existing_header = dup_row["header"] if isinstance(dup_row["header"], dict) else json.loads(dup_row["header"])
                 yield f"data: {json.dumps({'stage': 'exact_duplicate', 'existing_id': dup_row['id'], 'existing_file_name': dup_row['file_name'], 'existing_date': existing_header.get('issue_date',''), 'existing_fund': existing_header.get('Underlying_Fund_Name_short',''), 'existing_net': existing_header.get('LP_net_amount')}, ensure_ascii=False)}\n\n"
@@ -1410,7 +1423,7 @@ async def upload_notice(
 
             # Call Gemini with heartbeat — send periodic SSE events so frontend
             # can distinguish "still waiting for API" from "connection dead"
-            gemini_task = asyncio.create_task(call_gemini(pdf_b64, model, user_id=user["id"]))
+            gemini_task = asyncio.create_task(call_gemini(pdf_b64, model, org_id=target_org))
             HEARTBEAT_SEC = 10
             hb_count = 0
             while not gemini_task.done():
@@ -1431,7 +1444,7 @@ async def upload_notice(
 
             # Phase 3: content-based duplicate check (after AI parsing)
             dup_key = _make_duplicate_key(header)
-            dup_type2, dup_row2 = _find_duplicate(None, header, user_id=user["id"])
+            dup_type2, dup_row2 = _find_duplicate(None, header, org_id=target_org)
             if dup_type2 == "content":
                 # AI already spent — save result to pending, let user decide
                 elapsed = int((time.time() - t0) * 1000)
@@ -1476,7 +1489,7 @@ async def upload_notice(
 
             # Save to DB
             db_insert("notices", {
-                    "id": notice_id, "file_name": file_name, "user_id": user["id"],
+                    "id": notice_id, "file_name": file_name, "user_id": user["id"], "org_id": target_org,
                     "header": header, "line_items": line_items,
                     "raw_ai_response": gemini_result["raw_text"],
                     "pdf_hash": pdf_hash, "page_count": pdf_info["page_count"], "duplicate_key": dup_key
@@ -1507,6 +1520,7 @@ async def upload_notice(
 @app.put("/api/notices/{new_id}/resolve-duplicate")
 async def resolve_duplicate(new_id: str, body: dict, request: Request):
     user = await get_current_user(request)
+    require_uploader(user)
     """Resolve a duplicate notice. action: 'keep_existing' or 'replace_with_new'."""
     action = body.get("action")
     existing_id = body.get("existing_id")
@@ -1526,7 +1540,7 @@ async def resolve_duplicate(new_id: str, body: dict, request: Request):
         # Save pending as new notice
         db_insert("notices", {
                 "id": pending["notice_id"], "file_name": pending["file_name"],
-                "user_id": user["id"],
+                "user_id": user["id"], "org_id": user.get("org_id", ""),
                 "header": pending["header"], "line_items": pending["line_items"],
                 "raw_ai_response": pending["raw_text"],
                 "pdf_hash": pending["pdf_hash"], "page_count": pending["page_count"],
@@ -1546,13 +1560,13 @@ async def resolve_duplicate(new_id: str, body: dict, request: Request):
 @app.post("/api/notices/{notice_id}/reparse")
 async def reparse_notice(notice_id: str, request: Request, model: Optional[str] = Query(None)):
     user = await get_current_user(request)
+    require_uploader(user)
     await check_notice_access(notice_id, user)
-    """Re-parse an existing notice from its stored PDF. Updates in-place (same ID).
-    Returns SSE stream like /api/upload."""
     # Find existing notice and its PDF
     r = db_get("notices", notice_id)
     if not r:
         raise HTTPException(404, "Notice not found in database")
+    target_org = r.get("org_id") or user.get("org_id", "")
     file_name = r["file_name"]
     pdf_bytes = load_pdf(notice_id)
     if not pdf_bytes:
@@ -1588,7 +1602,7 @@ async def reparse_notice(notice_id: str, request: Request, model: Optional[str] 
 
             yield f"data: {json.dumps({'stage': 'parsing'})}\n\n"
 
-            gemini_task = asyncio.create_task(call_gemini(pdf_b64, model, user_id=user["id"]))
+            gemini_task = asyncio.create_task(call_gemini(pdf_b64, model, org_id=target_org))
             hb_count = 0
             while not gemini_task.done():
                 try:
@@ -1695,6 +1709,8 @@ async def parse_multi_lp(
     """Parse a multi-LP omnibus notice for specific LP codes.
     Returns SSE stream: lp_parsing → lp_done/lp_error per LP → all_done."""
     user = await get_current_user(request)
+    require_uploader(user)
+    target_org = user.get("org_id", "")
     lp_list = json.loads(lp_codes)
     if not lp_list:
         raise HTTPException(400, "No LP codes provided")
@@ -1748,7 +1764,7 @@ async def parse_multi_lp(
                           f"using visual fallback prompt")
 
                 # ── Call Gemini with heartbeat ──
-                gemini_task = asyncio.create_task(call_gemini(pdf_b64, model, custom_prompt=targeted_prompt, user_id=user["id"]))
+                gemini_task = asyncio.create_task(call_gemini(pdf_b64, model, custom_prompt=targeted_prompt, org_id=target_org))
                 hb_count = 0
                 while not gemini_task.done():
                     try:
@@ -1868,7 +1884,7 @@ async def parse_multi_lp(
                 # sub-notices because sub_id contains a timestamp-based notice_id.
                 dup_key = _make_duplicate_key(header)
                 is_dup = False
-                _dup_q = get_supa().table("notices").select("*").eq("duplicate_key", dup_key).eq("user_id", user["id"]).limit(1).execute()
+                _dup_q = get_supa().table("notices").select("*").eq("duplicate_key", dup_key).eq("org_id", target_org).limit(1).execute()
                 existing = _dup_q.data[0] if _dup_q.data else None
                 if existing and existing["id"] != sub_id:
                     is_dup = True
@@ -1886,7 +1902,7 @@ async def parse_multi_lp(
                 try: db_delete("notices", sub_id)
                 except: pass
                 db_insert("notices", {
-                    "id": sub_id, "file_name": file_label, "user_id": user["id"],
+                    "id": sub_id, "file_name": file_label, "user_id": user["id"], "org_id": target_org,
                     "header": header, "line_items": line_items,
                     "raw_ai_response": gemini_result["raw_text"],
                     "pdf_hash": pdf_hash, "page_count": page_count, "duplicate_key": dup_key
@@ -1914,9 +1930,11 @@ async def parse_multi_lp(
 @app.post("/api/notices/defer-lp")
 async def defer_multi_lp(body: dict, request: Request):
     user = await get_current_user(request)
+    require_uploader(user)
     """Save a placeholder notice for a multi-LP PDF when the user doesn't know
     the LP code yet. The PDF is already on disk from the upload stage.
     The user can later click this notice and enter their LP code to trigger parsing."""
+    _target_org = user.get("org_id", "")
     notice_id = body.get("notice_id", "")
     file_name = body.get("file_name", "")
     fund_preview = body.get("fund_preview", "")
@@ -1949,7 +1967,7 @@ async def defer_multi_lp(body: dict, request: Request):
     _pdf_for_hash = load_pdf(notice_id)
     pdf_hash = hashlib.md5(_pdf_for_hash[:4096]).hexdigest()[:12] if _pdf_for_hash else ""
     db_upsert("notices", {
-        "id": notice_id, "file_name": file_name, "user_id": user["id"],
+        "id": notice_id, "file_name": file_name, "user_id": user["id"], "org_id": _target_org,
         "header": header, "line_items": [],
         "raw_ai_response": "", "pdf_hash": pdf_hash,
         "page_count": page_count, "duplicate_key": ""
@@ -1967,17 +1985,16 @@ async def defer_multi_lp(body: dict, request: Request):
 
 
 @app.get("/api/notices")
-async def list_notices(request: Request, view_user: Optional[str] = Query(None)):
+async def list_notices(request: Request, org_id: Optional[str] = Query(None)):
     user = await get_current_user(request)
-    role = await get_user_role(user["id"])
-    # Admin can view any user's data via ?view_user=xxx
-    target_user_id = user["id"]
-    if role == "admin" and view_user:
-        target_user_id = view_user
-    if role == "admin" and not view_user:
-        rows = db_list("notices", order_col="created_at", order_desc=True)
+    # Admin can filter by org_id
+    if is_admin(user):
+        if org_id and org_id != "all":
+            rows = db_list("notices", order_col="created_at", order_desc=True, org_id=org_id)
+        else:
+            rows = db_list("notices", order_col="created_at", order_desc=True)
     else:
-        rows = db_list("notices", order_col="created_at", order_desc=True, user_id=target_user_id)
+        rows = db_list("notices", order_col="created_at", order_desc=True, org_id=user["org_id"])
     result = []
     for r in rows:
         header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
@@ -2013,6 +2030,7 @@ async def get_notice(notice_id: str, request: Request):
 @app.delete("/api/notices/{notice_id}")
 async def delete_notice(notice_id: str, request: Request):
     user = await get_current_user(request)
+    require_uploader(user)
     await check_notice_access(notice_id, user)
     db_delete("notices", notice_id)
     delete_storage(notice_id)
@@ -2023,6 +2041,7 @@ async def delete_notice(notice_id: str, request: Request):
 async def update_item(notice_id: str, item_idx: int, updates: dict, request: Request):
     """Update a single line item (toggle type, commit, etc.)."""
     user = await get_current_user(request)
+    require_uploader(user)
     r = await check_notice_access(notice_id, user)
     if not r: raise HTTPException(404)
     items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
@@ -2036,6 +2055,7 @@ async def update_item(notice_id: str, item_idx: int, updates: dict, request: Req
 async def update_header(notice_id: str, updates: dict, request: Request):
     """Update header fields. Also handles is_voided/voided_by (DB columns)."""
     user = await get_current_user(request)
+    require_uploader(user)
     r = await check_notice_access(notice_id, user)
     if not r: raise HTTPException(404)
     header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
@@ -2053,6 +2073,7 @@ async def update_header(notice_id: str, updates: dict, request: Request):
 @app.put("/api/notices/{notice_id}/items")
 async def bulk_update_items(notice_id: str, request: Request, items: list = Body(...)):
     user = await get_current_user(request)
+    require_uploader(user)
     await check_notice_access(notice_id, user)
     """Replace all line items (for correction apply)."""
     db_update("notices", {"line_items": items}, notice_id)
@@ -2119,9 +2140,9 @@ Answer in the user's language. Be concise."""
         messages.append({"role": "user" if m["role"]=="user" else "model", "parts": [{"text": m["text"]}]})
     messages.append({"role": "user", "parts": [{"text": req.question}]})
 
-    uid = user["id"]
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{_get_setting('gemini_model', GEMINI_MODEL, user_id=uid)}:generateContent?key={GEMINI_KEY}"
-    qa_temp = float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), user_id=uid)) + 0.2  # slightly higher for chat
+    oid = user.get("org_id", "")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{_get_setting('gemini_model', GEMINI_MODEL, org_id=oid)}:generateContent?key={GEMINI_KEY}"
+    qa_temp = float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), org_id=oid)) + 0.2  # slightly higher for chat
     qa_temp = min(qa_temp, 2.0)
     async with httpx.AsyncClient(timeout=60.0) as client:
         resp = await client.post(url, json={
@@ -2157,25 +2178,26 @@ async def list_models(request: Request):
 @app.get("/api/settings")
 async def get_settings(request: Request):
     user = await get_current_user(request)
-    """Return all AI-related settings (per-user)."""
-    uid = user["id"]
+    """Return all AI-related settings (per-org)."""
+    oid = user.get("org_id", "")
     return {
-        "gemini_model": _get_setting("gemini_model", GEMINI_MODEL, user_id=uid),
-        "gemini_temperature": float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), user_id=uid)),
+        "gemini_model": _get_setting("gemini_model", GEMINI_MODEL, org_id=oid),
+        "gemini_temperature": float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), org_id=oid)),
     }
 
 @app.put("/api/settings")
 async def update_settings(body: dict, request: Request):
     user = await get_current_user(request)
-    """Update AI-related settings (per-user)."""
-    uid = user["id"]
+    require_uploader(user)
+    """Update AI-related settings (per-org)."""
+    oid = user.get("org_id", "")
     allowed = {"gemini_model", "gemini_temperature"}
     for k, v in body.items():
         if k in allowed:
-            _set_setting(k, str(v), user_id=uid)
+            _set_setting(k, str(v), org_id=oid)
     return {
-        "gemini_model": _get_setting("gemini_model", GEMINI_MODEL, user_id=uid),
-        "gemini_temperature": float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), user_id=uid)),
+        "gemini_model": _get_setting("gemini_model", GEMINI_MODEL, org_id=oid),
+        "gemini_temperature": float(_get_setting("gemini_temperature", str(GEMINI_TEMPERATURE), org_id=oid)),
     }
 
 
@@ -2258,9 +2280,9 @@ def _parse_gemini_json(raw_text: str) -> dict:
     return json.loads(js[bs:be+1])
 
 
-async def _call_gemini_text(prompt: str, model: str = None, temperature: float = None, user_id: str = None) -> str:
+async def _call_gemini_text(prompt: str, model: str = None, temperature: float = None, org_id: str = None) -> str:
     """Call Gemini with text-only prompt, return raw text response."""
-    _model = model or _get_setting("gemini_model", GEMINI_MODEL, user_id=user_id)
+    _model = model or _get_setting("gemini_model", GEMINI_MODEL, org_id=org_id)
     _temp = temperature if temperature is not None else ASSET_GROUP_TEMPERATURE
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{_model}:generateContent?key={GEMINI_KEY}"
     payload = {
@@ -2278,6 +2300,7 @@ async def _call_gemini_text(prompt: str, model: str = None, temperature: float =
 @app.post("/api/asset-groups")
 async def create_asset_groups(body: dict, request: Request):
     user = await get_current_user(request)
+    require_uploader(user)
     """AI-based asset name grouping with two-pass strategy. Returns SSE stream."""
     fund_key = body.get("fund_key", "")
     asset_names = body.get("asset_names", [])
@@ -2295,7 +2318,7 @@ async def create_asset_groups(body: dict, request: Request):
             prompt1 = ASSET_GROUP_PROMPT_PASS1 + names_text
 
             # Call with heartbeat
-            gemini_task = asyncio.create_task(_call_gemini_text(prompt1, model, user_id=user["id"]))
+            gemini_task = asyncio.create_task(_call_gemini_text(prompt1, model, org_id=user["org_id"]))
             hb_count = 0
             while not gemini_task.done():
                 try:
@@ -2338,7 +2361,7 @@ async def create_asset_groups(body: dict, request: Request):
 
                 prompt2 = ASSET_GROUP_PROMPT_PASS2.replace("{existing_groups}", existing_desc).replace("{singletons}", singleton_list)
 
-                gemini_task2 = asyncio.create_task(_call_gemini_text(prompt2, model, user_id=user["id"]))
+                gemini_task2 = asyncio.create_task(_call_gemini_text(prompt2, model, org_id=user["org_id"]))
                 hb_count2 = 0
                 while not gemini_task2.done():
                     try:
@@ -2383,11 +2406,12 @@ async def create_asset_groups(body: dict, request: Request):
             yield f"data: {json.dumps({'stage': 'progress', 'pct': 95, 'message': '저장 중...'})}\n\n"
 
             uid = user["id"]
-            existing_ag = get_supa().table("asset_groups").select("fund_key").eq("fund_key", fund_key).eq("user_id", uid).limit(1).execute()
+            oid = user.get("org_id", "")
+            existing_ag = get_supa().table("asset_groups").select("fund_key").eq("fund_key", fund_key).eq("org_id", oid).limit(1).execute()
             if existing_ag.data:
-                get_supa().table("asset_groups").update({"groups_json": groups}).eq("fund_key", fund_key).eq("user_id", uid).execute()
+                get_supa().table("asset_groups").update({"groups_json": groups}).eq("fund_key", fund_key).eq("org_id", oid).execute()
             else:
-                get_supa().table("asset_groups").insert({"fund_key": fund_key, "groups_json": groups, "user_id": uid}).execute()
+                get_supa().table("asset_groups").insert({"fund_key": fund_key, "groups_json": groups, "org_id": oid}).execute()
 
             final_singletons = sum(1 for v in groups.values() if isinstance(v, list) and len(v) == 1)
             final_merged = sum(1 for v in groups.values() if isinstance(v, list) and len(v) > 1)
@@ -2405,9 +2429,9 @@ async def create_asset_groups(body: dict, request: Request):
 @app.get("/api/asset-groups/{fund_key}")
 async def get_asset_groups(fund_key: str, request: Request):
     user = await get_current_user(request)
-    """Retrieve saved asset groups for a fund (per-user)."""
-    uid = user["id"]
-    r = get_supa().table("asset_groups").select("*").eq("fund_key", fund_key).eq("user_id", uid).limit(1).execute()
+    """Retrieve saved asset groups for a fund (per-org)."""
+    oid = user.get("org_id", "")
+    r = get_supa().table("asset_groups").select("*").eq("fund_key", fund_key).eq("org_id", oid).limit(1).execute()
     row = r.data[0] if r.data else None
     if not row:
         return {"fund_key": fund_key, "groups": None}
@@ -2421,28 +2445,108 @@ async def get_asset_groups(fund_key: str, request: Request):
 @app.put("/api/asset-groups/{fund_key}")
 async def save_asset_groups(fund_key: str, body: dict, request: Request):
     user = await get_current_user(request)
-    """Save/update asset groups for a fund (per-user)."""
-    uid = user["id"]
+    require_uploader(user)
+    """Save/update asset groups for a fund (per-org)."""
+    oid = user.get("org_id", "")
     groups = body.get("groups", {})
-    # Check if row exists for this user+fund
-    existing = get_supa().table("asset_groups").select("fund_key").eq("fund_key", fund_key).eq("user_id", uid).limit(1).execute()
+    existing = get_supa().table("asset_groups").select("fund_key").eq("fund_key", fund_key).eq("org_id", oid).limit(1).execute()
     if existing.data:
-        get_supa().table("asset_groups").update({"groups_json": groups}).eq("fund_key", fund_key).eq("user_id", uid).execute()
+        get_supa().table("asset_groups").update({"groups_json": groups}).eq("fund_key", fund_key).eq("org_id", oid).execute()
     else:
-        get_supa().table("asset_groups").insert({"fund_key": fund_key, "groups_json": groups, "user_id": uid}).execute()
+        get_supa().table("asset_groups").insert({"fund_key": fund_key, "groups_json": groups, "org_id": oid}).execute()
     return {"ok": True, "fund_key": fund_key}
 
 
 # ── Auth Info ──────────────────────────────────────────
 @app.get("/api/auth/me")
 async def auth_me(request: Request):
-    """Return current user info + role."""
+    """Return current user info + role + org."""
     user = await get_current_user(request)
-    role = await get_user_role(user["id"])
-    return {"id": user["id"], "email": user["email"], "role": role}
+    org = None
+    if user.get("org_id"):
+        org_row = db_get("organizations", user["org_id"])
+        if org_row:
+            org = {"id": org_row["id"], "name": org_row["name"]}
+    return {"id": user["id"], "email": user["email"], "role": user["role"],
+            "org_id": user.get("org_id"), "org": org}
+
+
+# ── Organizations API ─────────────────────────────────
+
+@app.get("/api/organizations")
+async def list_organizations():
+    """List organizations available for registration (is_system=FALSE only). No auth required."""
+    rows = db_list("organizations", order_col="created_at", order_desc=False)
+    return [{"id": r["id"], "name": r["name"]} for r in rows if not r.get("is_system")]
+
+
+@app.post("/api/auth/register-org")
+async def register_org(body: dict, request: Request):
+    """Assign org to user after signup. Creates new org if org_name provided."""
+    user = await get_current_user(request)
+    org_id = body.get("org_id")
+    org_name = body.get("org_name", "").strip()
+
+    if not org_id and not org_name:
+        raise HTTPException(400, "org_id or org_name required")
+
+    if org_name:
+        # Create new organization
+        new_id = "org_" + org_name.lower().replace(" ", "_").replace("-", "_")[:30]
+        existing = db_get("organizations", new_id)
+        if existing:
+            org_id = new_id  # Already exists, just join
+        else:
+            db_insert("organizations", {"id": new_id, "name": org_name, "is_system": False})
+            org_id = new_id
+            print(f"  [ORG] New organization created: {org_name} ({new_id})")
+
+    # Update user's org_id
+    db_update("user_roles", {"org_id": org_id}, user["id"], id_col="user_id")
+    return {"ok": True, "org_id": org_id}
+
+
+# ── Favorites API ─────────────────────────────────────
+
+@app.get("/api/favorites")
+async def get_favorites(request: Request):
+    """Get user's subscribed fund keys."""
+    user = await get_current_user(request)
+    rows = db_list("user_fund_favorites", user_id=user["id"])
+    return [r["fund_key"] for r in rows]
+
+
+@app.put("/api/favorites")
+async def save_favorites(body: dict, request: Request):
+    """Save user's subscribed fund keys (full replace)."""
+    user = await get_current_user(request)
+    fund_keys = body.get("fund_keys", [])
+    # Delete all existing
+    get_supa().table("user_fund_favorites").delete().eq("user_id", user["id"]).execute()
+    # Insert new
+    for fk in fund_keys:
+        if fk and isinstance(fk, str):
+            db_insert("user_fund_favorites", {"user_id": user["id"], "fund_key": fk})
+    return {"ok": True, "fund_keys": fund_keys}
 
 
 # ── Admin API ──────────────────────────────────────────
+
+@app.get("/api/admin/organizations")
+async def admin_list_organizations(request: Request):
+    """List all organizations with stats. Admin only."""
+    admin = await require_admin(request)
+    orgs = db_list("organizations", order_col="created_at", order_desc=False)
+    result = []
+    for o in orgs:
+        notice_count = len(db_list("notices", org_id=o["id"]))
+        user_count = len(db_list("user_roles", org_id=o["id"]))
+        result.append({
+            "id": o["id"], "name": o["name"], "is_system": o.get("is_system", False),
+            "notice_count": notice_count, "user_count": user_count,
+        })
+    return result
+
 @app.get("/api/admin/users")
 async def admin_list_users(request: Request):
     """List all users with notice counts. Admin only."""
@@ -2450,22 +2554,30 @@ async def admin_list_users(request: Request):
     roles = db_list("user_roles", order_col="created_at", order_desc=False)
     result = []
     for r in roles:
-        # Count notices for this user
-        notices = db_list("notices", user_id=r["user_id"])
+        # Count notices for this user's org
+        org_id = r.get("org_id", "")
+        org_row = db_get("organizations", org_id) if org_id else None
         result.append({
             "user_id": r["user_id"],
             "email": r.get("email", ""),
-            "role": r.get("role", "user"),
+            "role": r.get("role", "uploader"),
+            "org_id": org_id,
+            "org_name": org_row["name"] if org_row else "",
             "created_at": r.get("created_at"),
-            "notice_count": len(notices),
         })
     return result
 
 @app.get("/api/admin/users/{uid}/notices")
 async def admin_user_notices(uid: str, request: Request):
-    """List notices for a specific user. Admin only."""
+    """List notices for a specific user's org. Admin only."""
     admin = await require_admin(request)
-    rows = db_list("notices", order_col="created_at", order_desc=True, user_id=uid)
+    # Get user's org
+    ur = db_get("user_roles", uid, id_col="user_id")
+    org_id = ur.get("org_id", "") if ur else ""
+    if org_id:
+        rows = db_list("notices", order_col="created_at", order_desc=True, org_id=org_id)
+    else:
+        rows = db_list("notices", order_col="created_at", order_desc=True, user_id=uid)
     result = []
     for r in rows:
         header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
@@ -2480,29 +2592,34 @@ async def admin_user_notices(uid: str, request: Request):
 
 @app.put("/api/admin/users/{uid}/role")
 async def admin_update_role(uid: str, body: dict, request: Request):
-    """Change user role. Admin only."""
+    """Change user role (uploader ↔ viewer only). Admin only."""
     admin = await require_admin(request)
-    new_role = body.get("role", "user")
-    if new_role not in ("user", "admin"):
-        raise HTTPException(400, "Role must be 'user' or 'admin'")
+    new_role = body.get("role", "uploader")
+    if new_role not in ("uploader", "viewer"):
+        raise HTTPException(400, "Role must be 'uploader' or 'viewer'")
+    # Cannot change another admin's role
+    target = db_get("user_roles", uid, id_col="user_id")
+    if target and target.get("role") == "admin":
+        raise HTTPException(400, "Cannot change admin role from frontend")
     db_update("user_roles", {"role": new_role}, uid, id_col="user_id")
     return {"ok": True, "user_id": uid, "role": new_role}
 
 @app.delete("/api/admin/users/{uid}")
 async def admin_delete_user(uid: str, request: Request):
-    """Delete a user's data (notices + storage). Admin only."""
+    """Delete a user and their favorites. Admin only. Notices belong to org, not deleted."""
     admin = await require_admin(request)
     if uid == admin["id"]:
         raise HTTPException(400, "Cannot delete yourself")
-    # Delete all notices + files for this user
-    notices = db_list("notices", user_id=uid)
-    for n in notices:
-        delete_storage(n["id"])
-        db_delete("notices", n["id"])
+    target = db_get("user_roles", uid, id_col="user_id")
+    if target and target.get("role") == "admin":
+        raise HTTPException(400, "Cannot delete another admin")
+    # Delete favorites
+    try: get_supa().table("user_fund_favorites").delete().eq("user_id", uid).execute()
+    except: pass
     # Delete role entry
     try: db_delete("user_roles", uid, id_col="user_id")
     except: pass
-    return {"ok": True, "deleted_notices": len(notices)}
+    return {"ok": True}
 
 
 # ── Health ──────────────────────────────────────────────

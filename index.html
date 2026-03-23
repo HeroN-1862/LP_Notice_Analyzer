@@ -367,7 +367,7 @@ const API=location.origin; // auto-detect: works for localhost and deployed URLs
 /* ===== AUTH ===== */
 let _sb = null; // Supabase client
 let _session = null; // current session
-let _userRole = 'user'; // 'user' or 'admin'
+let _userRole = 'uploader'; // 'admin' | 'uploader' | 'viewer'
 
 async function initAuth() {
   // Step 1: Create Supabase client (plain fetch — no auth needed)
@@ -398,10 +398,16 @@ async function loadUserRole() {
     const r = await authFetch(`${API}/api/auth/me`);
     if (r.ok) {
       const d = await r.json();
-      _userRole = d.role || 'user';
-      S._adminViewUser = null; // reset admin view
+      _userRole = d.role || 'uploader';
+      S._userOrg = d.org || null;
+      S._adminViewUser = null;
     }
-  } catch(e) { _userRole = 'user'; }
+  } catch(e) { _userRole = 'uploader'; }
+  // Load favorites
+  try {
+    const r = await authFetch(`${API}/api/favorites`);
+    if (r.ok) { S._favorites = await r.json(); S._favoritesActive = S._favorites.length > 0; }
+  } catch(e) {}
 }
 
 async function authFetch(url, opts = {}) {
@@ -447,7 +453,12 @@ async function doRegister(email, password) {
 async function doLogout() {
   if (_sb) await _sb.auth.signOut();
   _session = null;
-  _userRole = 'user';
+  _userRole = 'uploader';
+  S._userOrg = null;
+  S._favorites = [];
+  S._favoritesActive = false;
+  S._adminOrgs = [];
+  S._adminOrgFilter = null;
   S.notices = [];
   S.page = 'login';
   R();
@@ -483,6 +494,11 @@ const S = {
   showFundMerge: null,  // fund merge confirmation popup
   _adminViewUser: null,  // admin viewing another user's data
   _adminUsers: [],       // admin user list cache
+  _userOrg: null,        // { id, name }
+  _favorites: [],        // ['fund_key_1', ...]
+  _favoritesActive: false,
+  _adminOrgFilter: null, // admin org filter: org_id or 'all'
+  _adminOrgs: [],        // admin org list cache
 };
 let _noticeCounter = 0;
 let _batchCounter = 0;
@@ -533,6 +549,8 @@ async function loadFromBackend(){
     }catch(e){}
     loadGeminiModels();
     loadAssetGroups();
+    // Admin: load org list for portfolio cards + upload selector
+    if(_userRole==='admin') loadAdminOrgs();
     R();
   }catch(e){console.warn('Backend load failed:',e);}
 }
@@ -649,24 +667,36 @@ function renderSB(){
     <div class="sb-head"><div class="sb-logo" onclick="location.reload()" style="cursor:pointer" title="새로고침"><i>N</i><span>Notice Analyzer</span></div></div>
     <div style="padding:4px 6px 0">
       <div class="sb-gl">메뉴</div>
-      <div class="sb-it ${S.page==='upload'?'act':''} ${!S.connected?'dis':''}" onclick="go('upload')"><span class="ic">+</span><span>PDF 업로드</span>${uploadBadge}</div>
+      <div class="sb-it ${S.page==='upload'?'act':''} ${!S.connected||_userRole==='viewer'?'dis':''}" onclick="${_userRole==='viewer'?'alert(\"열람 전용 계정입니다\")':'go(\"upload\")'}" ${_userRole==='viewer'?'title="열람 전용 계정"':''}><span class="ic">+</span><span>PDF 업로드</span>${uploadBadge}</div>
       <div class="sb-it ${S.page==='portfolio'?'act':''} ${!notices.length?'dis':''}" onclick="go('portfolio')"><span class="ic">◈</span><span>Portfolio</span>
         ${notices.length?`<span class="badge ok">${notices.length}</span>`:''}</div>
+      <div class="sb-it ${S.page==='favorites'?'act':''}" onclick="go('favorites')"><span class="ic">★</span><span>Favorites</span>
+        ${S._favorites.length?`<span class="badge ok">${S._favorites.length}</span>`:''}</div>
       ${_userRole==='admin'?`<div class="sb-it ${S.page==='admin'?'act':''}" onclick="goAdmin()"><span class="ic">👤</span><span>사용자 관리</span></div>`:''}
       ${notices.length?`<div class="sb-div"></div><div class="sb-gl" style="display:flex;align-items:center;justify-content:space-between">
-        <span>Notices (${notices.length})</span>
+        <span>Notices (${_sbFilteredCount!==undefined?_sbFilteredCount:notices.length})</span>
         <span onclick="sbCollapseAll()" style="cursor:pointer;font-size:10px;color:var(--t3);padding:2px 6px;border-radius:3px;border:1px solid var(--bdr);user-select:none;transition:all .12s" onmouseover="this.style.color='var(--t1)'" onmouseout="this.style.color='var(--t3)'" title="${_sbAllCollapsed?'모든 펀드 Notice 펼치기':'모든 펀드 Notice 접기'}">${_sbAllCollapsed?'펼치기':'접기'}</span>
       </div>`:''}
     </div>
     <nav class="sb-nav">
       ${(()=>{
         if(!notices.length) return '';
+        // Favorites filter: show only subscribed funds
+        let _sbNotices=notices;
+        if(S._favoritesActive && S._favorites.length){
+          _sbNotices=notices.filter(n=>{
+            const fk=(n.header.Fund_ID_Key||'').toLowerCase();
+            return S._favorites.some(f=>f.toLowerCase()===fk);
+          });
+        }
+        window._sbFilteredCount=_sbNotices.length;
+        if(!_sbNotices.length) return '<div style="padding:12px;font-size:11px;color:var(--t3);text-align:center">Favorites에 해당하는 Notice가 없습니다</div>';
         // Phase 1: LP_code-based Fund Alias — legacy fallback only (same as buildTree)
-        const _sbHasFundIdKey=notices.some(n=>n.header.Fund_ID_Key);
+        const _sbHasFundIdKey=_sbNotices.some(n=>n.header.Fund_ID_Key);
         const _sbAliasMap={};
         if(!_sbHasFundIdKey){
           const _sbLpToFund={};
-          notices.forEach(n=>{
+          _sbNotices.forEach(n=>{
             const fFull=n.header.Underlying_Fund_Name_full||n.header.Underlying_Fund_Name_short||'Unknown';
             const fKey=normalizeFundName(fFull)||fFull;
             const lpCode=n.header.LP_code||'';
@@ -686,7 +716,7 @@ function renderSB(){
 
         // Phase 2: Group by Fund → LP (2-tier, matching buildTree)
         const fundGroups={};
-        notices.forEach(n=>{
+        _sbNotices.forEach(n=>{
           const fFull=n.header.Underlying_Fund_Name_full||n.header.Underlying_Fund_Name_short||'Unknown';
           const fShort=n.header.Underlying_Fund_Name_short||n.header.Underlying_Fund_Name_full||'Unknown';
           let fKey=getFundKey(n.header);
@@ -768,7 +798,9 @@ function renderSB(){
       <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
         <button class="btn btn-sm btn-s" style="flex:1;font-size:11px;padding:5px 0;${S.page==='settings'?'background:var(--bg4);font-weight:600':''}" onclick="go('settings')">⚙ 설정</button>
         <button class="btn btn-sm btn-s" style="flex:1;font-size:11px;padding:5px 0;color:var(--t3)" onclick="doLogout()">로그아웃</button>
-        ${_userRole==='admin'?'<span style="font-size:9px;color:var(--indigo);font-weight:700;background:var(--indigo-d);padding:3px 7px;border-radius:3px;flex-shrink:0">ADMIN</span>':''}
+        ${_userRole==='admin'?'<span style="font-size:9px;color:var(--indigo);font-weight:700;background:var(--indigo-d);padding:3px 7px;border-radius:3px;flex-shrink:0">ADMIN</span>'
+          :_userRole==='viewer'?'<span style="font-size:9px;color:var(--slate);font-weight:700;background:var(--slate-d);padding:3px 7px;border-radius:3px;flex-shrink:0">VIEWER</span>'
+          :'<span style="font-size:9px;color:var(--teal);font-weight:700;background:var(--teal-d);padding:3px 7px;border-radius:3px;flex-shrink:0">UPLOADER</span>'}
       </div>`:''}
       <div style="padding:0 2px">
         ${S.connected?'<span style="color:var(--teal);font-size:11px">● 연결됨</span>':'<span style="color:var(--red);font-size:11px">● 연결 안됨</span>'}
@@ -836,13 +868,17 @@ function renderPG(){
   // Auth pages — no sidebar needed
   if(S.page==='login'||S.page==='register'||S.page==='verify_email'){
     h.innerHTML='';
+    if(S.page==='register'&&!window._regOrgs){
+      fetch(`${API}/api/organizations`).then(r=>r.json()).then(d=>{window._regOrgs=d;R();}).catch(()=>{});
+    }
     b.innerHTML=pgAuth();
     return;
   }
   switch(S.page){
     case'settings':h.innerHTML='<h1>설정</h1><p>서버 연결 · AI 모델 · Temperature</p>';b.innerHTML=pgSettings();loadGeminiModels();break;
-    case'upload':h.innerHTML='<h1>PDF 업로드</h1><p>Notice PDF를 업로드하면 자동 분석 후 누적 관리됩니다</p>';b.innerHTML=pgUpload();break;
-    case'portfolio':h.innerHTML=`<h1>Portfolio Overview</h1><p>${S.notices.length}건의 Notice · Fund → LP → Class 계층 구조</p>`;b.innerHTML=pgPortfolio();break;
+    case'upload':h.innerHTML='<h1>PDF 업로드</h1><p>Notice PDF를 업로드하면 자동 분석 후 누적 관리됩니다</p>';b.innerHTML=pgUpload();if(_userRole==='admin'&&!S._adminOrgs.length)loadAdminOrgs();break;
+    case'portfolio':h.innerHTML=`<h1>Portfolio Overview</h1><p>${S.notices.length}건의 Notice · Fund → LP → Class 계층 구조</p>`;b.innerHTML=(_userRole==='admin'?pgAdminOrgCards():'')+pgPortfolio();if(_userRole==='admin'&&!S._adminOrgs.length)loadAdminOrgs();break;
+    case'favorites':h.innerHTML='<h1>★ 담당 펀드 설정</h1><p>관심 펀드를 선택하면 사이드바에 해당 펀드의 Notice만 표시됩니다</p>';b.innerHTML=pgFavorites();break;
     case'result':renderResultPG(h,b);break;
     case'admin':h.innerHTML='<h1>사용자 관리</h1><p>가입된 사용자 목록 및 데이터 관리</p>';b.innerHTML=pgAdmin();if(!S._adminUsers.length)loadAdminUsers();break;
   }
@@ -897,6 +933,15 @@ function pgAuth(){
         <label style="font-size:12px;color:var(--t2);display:block;margin-bottom:4px">비밀번호 확인</label>
         <input id="authPw2" type="password" placeholder="비밀번호 재입력" style="width:100%;padding:10px 12px;border:1px solid var(--bdr);border-radius:6px;font-size:14px;box-sizing:border-box;background:var(--bg0)"
           onkeydown="if(event.key==='Enter')doAuthSubmit()"/>
+      </div>
+      <div style="margin-bottom:20px">
+        <label style="font-size:12px;color:var(--t2);display:block;margin-bottom:4px">소속기관</label>
+        <select id="authOrg" style="width:100%;padding:10px 12px;border:1px solid var(--bdr);border-radius:6px;font-size:14px;box-sizing:border-box;background:var(--bg0)" onchange="document.getElementById('authOrgCustom').style.display=this.value==='_custom'?'block':'none'">
+          <option value="">선택하세요</option>
+          ${(window._regOrgs||[]).map(o=>'<option value="'+o.id+'">'+escH(o.name)+'</option>').join('')}
+          <option value="_custom">직접 입력</option>
+        </select>
+        <input id="authOrgCustom" type="text" placeholder="기관명 입력" style="display:none;width:100%;padding:10px 12px;border:1px solid var(--bdr);border-radius:6px;font-size:14px;box-sizing:border-box;background:var(--bg0);margin-top:6px"/>
       </div>`:''}
       <button id="authBtn" class="btn btn-p" style="width:100%;padding:10px;font-size:14px" onclick="doAuthSubmit()">${isLogin?'로그인':'가입하기'}</button>
       <div style="text-align:center;margin-top:16px;font-size:12px;color:var(--t3)">
@@ -919,14 +964,24 @@ async function doAuthSubmit(){
 
   if(S.page==='register'){
     const pw2=document.getElementById('authPw2')?.value||'';
+    const orgSel=document.getElementById('authOrg')?.value||'';
+    const orgCustom=(document.getElementById('authOrgCustom')?.value||'').trim();
     if(pw.length<8){showErr('비밀번호는 8자 이상이어야 합니다');return;}
     if(pw!==pw2){showErr('비밀번호가 일치하지 않습니다');return;}
+    if(!orgSel){showErr('소속기관을 선택해주세요');return;}
+    if(orgSel==='_custom'&&!orgCustom){showErr('기관명을 입력해주세요');return;}
     if(btn)btn.disabled=true;
     const res=await doRegister(email,pw);
     if(btn)btn.disabled=false;
     if(res.error){showErr(res.error);return;}
     if(res.needsConfirmation){S.page='verify_email';R();return;}
+    // Register org
+    try{
+      const orgBody=orgSel==='_custom'?{org_name:orgCustom}:{org_id:orgSel};
+      await authFetch(`${API}/api/auth/register-org`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(orgBody)});
+    }catch(e){console.warn('Org registration:',e);}
     S.page='upload';await loadFromBackend();return;
+  }
   }
 
   // Login
@@ -938,10 +993,93 @@ async function doAuthSubmit(){
   await loadFromBackend();
 }
 
+/* ===== FAVORITES PAGE ===== */
+function pgFavorites(){
+  // Get all unique fund keys from notices
+  const fundMap={};
+  S.notices.forEach(n=>{
+    const fk=(n.header.Fund_ID_Key||'').toLowerCase();
+    const fn=n.header.Underlying_Fund_Name_short||n.header.Underlying_Fund_Name_full||fk;
+    if(fk){
+      if(!fundMap[fk]) fundMap[fk]={name:fn,count:0};
+      fundMap[fk].count++;
+      if(fn.length>fundMap[fk].name.length) fundMap[fk].name=fn;
+    }
+  });
+  const funds=Object.entries(fundMap).sort((a,b)=>a[1].name.localeCompare(b[1].name));
+  const favSet=new Set(S._favorites.map(f=>f.toLowerCase()));
+  return`<div class="fi" style="max-width:600px;margin:0 auto">
+    <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--rl);padding:20px">
+      <p style="font-size:12px;color:var(--t2);margin-bottom:16px">관심 펀드를 선택하면 사이드바에 해당 펀드의 Notice만 표시됩니다. 미선택 시 전체 표시.</p>
+      ${funds.length?funds.map(([fk,f])=>`<label style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--bg4);cursor:pointer">
+        <input type="checkbox" class="fav-cb" data-fk="${escH(fk)}" ${favSet.has(fk)?'checked':''} style="width:16px;height:16px"/>
+        <span style="flex:1;font-size:13px;font-weight:500">${escH(f.name)}</span>
+        <span style="font-size:11px;color:var(--t3)">${f.count}건</span>
+      </label>`).join(''):'<p style="color:var(--t3);text-align:center;padding:20px">Notice가 없습니다. PDF를 업로드하면 펀드 목록이 표시됩니다.</p>'}
+      ${funds.length?`<div style="display:flex;gap:8px;margin-top:16px">
+        <button class="btn btn-sm btn-s" onclick="document.querySelectorAll('.fav-cb').forEach(c=>c.checked=true)">전체 선택</button>
+        <button class="btn btn-sm btn-s" onclick="document.querySelectorAll('.fav-cb').forEach(c=>c.checked=false)">전체 해제</button>
+        <button class="btn btn-sm btn-p" style="margin-left:auto" onclick="saveFavorites()">저장</button>
+      </div>`:''}
+    </div>
+  </div>`;
+}
+
+async function saveFavorites(){
+  const cbs=document.querySelectorAll('.fav-cb');
+  const keys=[];
+  cbs.forEach(cb=>{if(cb.checked)keys.push(cb.dataset.fk);});
+  S._favorites=keys;
+  S._favoritesActive=keys.length>0;
+  try{
+    await authFetch(`${API}/api/favorites`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({fund_keys:keys})});
+  }catch(e){console.warn('Save favorites failed:',e);}
+  R();
+}
+
+/* ===== ADMIN ORG CARDS (Portfolio top) ===== */
+function pgAdminOrgCards(){
+  if(!S._adminOrgs.length) return'';
+  const cards=S._adminOrgs.filter(o=>!o.is_system).map(o=>{
+    const act=S._adminOrgFilter===o.id;
+    return`<div onclick="adminFilterOrg('${o.id}')" style="flex:1;min-width:140px;padding:14px 16px;background:${act?'var(--indigo-d)':'var(--bg2)'};border:1px solid ${act?'var(--indigo)':'var(--bdr)'};border-radius:var(--rl);cursor:pointer;transition:all .15s;text-align:center">
+      <div style="font-size:13px;font-weight:600;color:${act?'var(--indigo)':'var(--t1)'}">${escH(o.name)}</div>
+      <div style="font-size:11px;color:var(--t3);margin-top:4px">${o.notice_count} notices · ${o.user_count} users</div>
+    </div>`;
+  });
+  const allAct=S._adminOrgFilter==='all'||!S._adminOrgFilter;
+  const totalN=S._adminOrgs.reduce((s,o)=>s+o.notice_count,0);
+  cards.push(`<div onclick="adminFilterOrg('all')" style="flex:1;min-width:140px;padding:14px 16px;background:${allAct?'var(--indigo-d)':'var(--bg2)'};border:1px solid ${allAct?'var(--indigo)':'var(--bdr)'};border-radius:var(--rl);cursor:pointer;transition:all .15s;text-align:center">
+    <div style="font-size:13px;font-weight:600;color:${allAct?'var(--indigo)':'var(--t1)'}">All</div>
+    <div style="font-size:11px;color:var(--t3);margin-top:4px">${totalN} notices</div>
+  </div>`);
+  return`<div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">${cards.join('')}</div>`;
+}
+
+async function loadAdminOrgs(){
+  try{
+    const r=await authFetch(`${API}/api/admin/organizations`);
+    if(r.ok) S._adminOrgs=await r.json();
+  }catch(e){}
+}
+
+async function adminFilterOrg(orgId){
+  S._adminOrgFilter=orgId;
+  // Reload notices for this org
+  try{
+    const url=orgId==='all'?`${API}/api/notices`:`${API}/api/notices?org_id=${encodeURIComponent(orgId)}`;
+    const r=await authFetch(url);
+    if(r.ok){
+      S.notices=await r.json();
+      S.notices.forEach(n=>{normalizeNames(n.header);deriveHeaderFields(n.header);});
+    }
+  }catch(e){}
+  R();
+}
+
 /* ===== ADMIN PAGE ===== */
 function pgAdmin(){
   if(!S._adminUsers.length) return`<div style="text-align:center;padding:60px;color:var(--t3)">사용자 목록을 불러오는 중...</div>`;
-  // If viewing a specific user's notices
   if(S._adminViewUser){
     const vu=S._adminUsers.find(u=>u.user_id===S._adminViewUser);
     return`<div class="fi">
@@ -957,21 +1095,25 @@ function pgAdmin(){
     <div style="background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--rl);overflow:hidden">
       <table class="it" style="width:100%">
         <thead><tr>
-          <th>이메일</th><th>역할</th><th>가입일</th><th style="text-align:center">Notices</th><th style="text-align:center">관리</th>
+          <th>이메일</th><th>소속기관</th><th>역할</th><th>가입일</th><th style="text-align:center">관리</th>
         </tr></thead>
         <tbody>${S._adminUsers.map(u=>`<tr style="cursor:pointer" onclick="adminViewUser('${u.user_id}')">
           <td style="font-weight:500">${escH(u.email)}</td>
-          <td><span class="tg ${u.role==='admin'?'tg-c':'tg-d'}" style="border-radius:10px;padding:1px 7px;font-size:10px">${u.role}</span></td>
+          <td style="font-size:11px">${escH(u.org_name||'')}</td>
+          <td>${u.role==='admin'?'<span class="tg tg-c" style="border-radius:10px;padding:1px 7px;font-size:10px">admin</span>'
+            :`<select onclick="event.stopPropagation()" onchange="adminChangeRole('${u.user_id}',this.value)" style="font-size:11px;padding:2px 6px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0)">
+              <option value="uploader" ${u.role==='uploader'?'selected':''}>uploader</option>
+              <option value="viewer" ${u.role==='viewer'?'selected':''}>viewer</option>
+            </select>`}</td>
           <td style="font-size:11px;color:var(--t3)">${u.created_at?u.created_at.substring(0,10):''}</td>
-          <td style="text-align:center;font-variant-numeric:tabular-nums">${u.notice_count}</td>
           <td style="text-align:center">
             ${u.role!=='admin'?`<button class="btn btn-sm" style="font-size:10px;padding:2px 6px;color:var(--red);border-color:var(--red)" onclick="event.stopPropagation();adminDeleteUser('${u.user_id}','${escH(u.email)}')">삭제</button>`:''}
           </td>
         </tr>`).join('')}</tbody>
       </table>
     </div>
-  </div>`;
-}
+  </div>`
+;}
 
 function renderAdminNoticeList(){
   const tree=buildTree();
@@ -1021,12 +1163,20 @@ async function adminViewUser(uid){
 }
 
 async function adminDeleteUser(uid,email){
-  if(!confirm(`"${email}"의 모든 데이터를 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.`))return;
+  if(!confirm(`"${email}"의 계정을 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.`))return;
   try{
     await authFetch(`${API}/api/admin/users/${uid}`,{method:'DELETE'});
     S._adminUsers=S._adminUsers.filter(u=>u.user_id!==uid);
     R();
   }catch(e){alert('삭제 실패: '+e.message);}
+}
+
+async function adminChangeRole(uid,newRole){
+  try{
+    await authFetch(`${API}/api/admin/users/${uid}/role`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({role:newRole})});
+    const u=S._adminUsers.find(x=>x.user_id===uid);
+    if(u) u.role=newRole;
+  }catch(e){alert('역할 변경 실패: '+e.message);R();}
 }
 
 function pgSettings(){
@@ -1118,6 +1268,12 @@ function pgUpload(){
   const hasJobs=S.jobs.length>0;
 
   return`<div style="max-width:600px;margin:30px auto" class="fi">
+    ${_userRole==='admin'?`<div style="margin-bottom:12px;display:flex;align-items:center;gap:8px">
+      <label style="font-size:11px;font-weight:600;color:var(--t2)">업로드 대상 기관:</label>
+      <select id="uploadOrgSelect" style="font-size:12px;padding:5px 10px;border:1px solid var(--bdr);border-radius:var(--r);background:var(--bg0)">
+        ${(S._adminOrgs||[]).filter(o=>!o.is_system).map(o=>`<option value="${o.id}">${escH(o.name)}</option>`).join('')}
+      </select>
+    </div>`:''}
     <div class="uz" id="uz"><div style="width:56px;height:56px;margin:0 auto 12px;background:var(--indigo-d);border:1px solid rgba(79,70,229,.15);border-radius:12px;display:grid;place-items:center;font-size:24px">📄</div><h3 style="font-size:14px;font-weight:600;margin-bottom:4px">Notice PDF를 드래그하거나 클릭</h3><p style="font-size:12px;color:var(--t2)">여러 파일 동시 선택 가능 · PDF</p>
       <input type=file id=fi accept=".pdf" multiple style="display:none"/></div>
 
@@ -1321,14 +1477,14 @@ function pgPortfolio(){
             <div>
               <div style="display:flex;align-items:center;gap:8px">
                 <span id="pfFundName${fi}" draggable="true" ondragstart="fundDragStart(event,${fi})" ondragend="this.style.opacity=''" style="font-size:15px;font-weight:700;color:var(--t1);cursor:grab" title="다른 펀드 카드에 드래그하여 병합">${escH(fund.displayName)}</span>
-                <span onclick="event.stopPropagation();editFundName(${fi},'${escH(fund.fullName).replace(/'/g,"\\'")}','${escH(fund.displayName).replace(/'/g,"\\'")}')" style="cursor:pointer;font-size:10px;color:var(--t3);opacity:.5;padding:1px 6px;border-radius:3px;border:1px solid var(--bdr);background:var(--bg0)" onmouseover="this.style.opacity='1';this.style.color='var(--t1)'" onmouseout="this.style.opacity='.5';this.style.color='var(--t3)'" title="펀드명 수정">펀드명 수정</span>
+                ${_userRole!=='viewer'?`<span onclick="event.stopPropagation();editFundName(${fi},'${escH(fund.fullName).replace(/'/g,"\\'")}','${escH(fund.displayName).replace(/'/g,"\\'")}')" style="cursor:pointer;font-size:10px;color:var(--t3);opacity:.5;padding:1px 6px;border-radius:3px;border:1px solid var(--bdr);background:var(--bg0)" onmouseover="this.style.opacity='1';this.style.color='var(--t1)'" onmouseout="this.style.opacity='.5';this.style.color='var(--t3)'" title="펀드명 수정">펀드명 수정</span>`:''}
               </div>
               <div style="font-size:11px;color:var(--t3);margin-top:2px">${escH(fund.fullName)}</div>
               <div style="font-size:11px;color:var(--t3)">${fund.lps.length} LP · ${fund.noticeCount}N · ${fA(fNet)}</div>
             </div>
             <div style="display:flex;align-items:center;gap:10px">
               <div style="font-size:11px;color:var(--teal)">● ${issueCount} notices</div>
-              <button onclick="event.stopPropagation();deleteFund(${fi})" style="padding:3px 8px;font-size:10px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;opacity:.5;transition:all .15s" onmouseover="this.style.opacity='1';this.style.borderColor='var(--red)';this.style.color='var(--red)'" onmouseout="this.style.opacity='.5';this.style.borderColor='';this.style.color='var(--t3)'" title="이 펀드의 모든 Notice 삭제">삭제</button>
+              ${_userRole!=='viewer'?`<button onclick="event.stopPropagation();deleteFund(${fi})" style="padding:3px 8px;font-size:10px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;opacity:.5;transition:all .15s" onmouseover="this.style.opacity='1';this.style.borderColor='var(--red)';this.style.color='var(--red)'" onmouseout="this.style.opacity='.5';this.style.borderColor='';this.style.color='var(--t3)'" title="이 펀드의 모든 Notice 삭제">삭제</button>`:''}
             </div>
           </div>
           <!-- LP sections -->
@@ -1896,8 +2052,8 @@ function renderResultPG(hEl,bEl){
       ${voidsInfo?`<div>${voidsInfo}</div>`:''}
     </div>
     <div style="display:flex;gap:6px;flex-shrink:0">
-      <button style="padding:4px 10px;font-size:11px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;transition:all .15s" onclick="reparseNotice('${n.id}')" onmouseover="this.style.borderColor='var(--indigo)';this.style.color='var(--indigo)'" onmouseout="this.style.borderColor='';this.style.color='var(--t3)'" title="저장된 PDF로 AI 재파싱 (재업로드 불필요)">↻ 재파싱</button>
-      <button class="btn-danger" onclick="deleteNotice('${n.id}')">삭제</button>
+      ${_userRole!=='viewer'?`<button style="padding:4px 10px;font-size:11px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;transition:all .15s" onclick="reparseNotice('${n.id}')" onmouseover="this.style.borderColor='var(--indigo)';this.style.color='var(--indigo)'" onmouseout="this.style.borderColor='';this.style.color='var(--t3)'" title="저장된 PDF로 AI 재파싱 (재업로드 불필요)">↻ 재파싱</button>
+      <button class="btn-danger" onclick="deleteNotice('${n.id}')">삭제</button>`:''}
     </div></div>`;
 
   const _lpName=h.LP_Name_full&&h.LP_Name_full!=='N/A'&&h.LP_Name_full!=='Unknown LP';
@@ -2465,7 +2621,7 @@ function rItems(items){
     <div class="sh"><div class="st">Line Items</div>
     <div style="display:flex;align-items:center;gap:8px">
       <span style="font-size:11px;color:var(--t3)">${ri.length}개 항목</span>
-      <button class="btn btn-sm ${em?'btn-p':'btn-s'}" style="font-size:11px;padding:3px 10px" onclick="toggleEditMode()">${em?'✓ 편집 완료':'✏️ 편집'}</button>
+      ${_userRole!=='viewer'?`<button class="btn btn-sm ${em?'btn-p':'btn-s'}" style="font-size:11px;padding:3px 10px" onclick="toggleEditMode()">${em?'✓ 편집 완료':'✏️ 편집'}</button>`:''}
     </div></div>
     ${em?'<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:rgba(30,58,95,.06);border:1px solid rgba(30,58,95,.18);border-radius:5px;margin-bottom:8px;font-size:11px;color:#1e3a5f;font-weight:500"><span style="font-size:13px">✏️</span> 편집 모드 — 항목명, 금액, Issue/Due Date를 수정할 수 있습니다. Type/Commit은 클릭으로 전환합니다.</div>':''}
     <div class="tw" style="${em?'border:2px solid #1e3a5f;border-radius:var(--r)':''}"><table class="it"><thead><tr><th style="width:32px">#</th><th>Item</th><th style="text-align:right">LP Amount</th><th style="text-align:center">Type</th><th style="text-align:center;width:52px">Commit</th><th style="text-align:center;width:32px" title="PDF 매칭 신뢰도">📍</th></tr></thead>
@@ -2531,6 +2687,7 @@ function rItems(items){
 }
 
 function toggleEditMode(){
+  if(_userRole==='viewer') return;
   S.editMode=!S.editMode;
   if(!S.editMode){
     // Save to backend when exiting edit mode
@@ -2830,8 +2987,8 @@ function rExposure(n){
     ?`<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--amber)"><div class="spin-s" style="width:14px;height:14px;border-width:2px"></div>AI 그룹화 중...</div>`
     :`<div style="display:flex;align-items:center;gap:6px">
         ${hasAiGroups?`<span style="font-size:10px;color:var(--teal);background:var(--teal-d);padding:1px 6px;border-radius:3px">AI 그룹 적용 중</span>`:''}
-        <button class="btn btn-sm btn-s${hasAiGroups?'':' ae-glow-btn'}" style="font-size:11px;padding:3px 10px;position:relative" onclick="runAssetGroupAI('${escH(fundKey)}')">자산명 AI 그룹화 <span style="font-size:12px">↻</span></button>
-        ${hasAiGroups?`<button class="btn btn-sm btn-s" style="font-size:10px;padding:2px 8px;color:var(--t3)" onclick="clearAssetGroups('${escH(fundKey)}')">초기화</button>`:''}
+        ${_userRole!=='viewer'?`<button class="btn btn-sm btn-s${hasAiGroups?'':' ae-glow-btn'}" style="font-size:11px;padding:3px 10px;position:relative" onclick="runAssetGroupAI('${escH(fundKey)}')">자산명 AI 그룹화 <span style="font-size:12px">↻</span></button>
+        ${hasAiGroups?'<button class="btn btn-sm btn-s" style="font-size:10px;padding:2px 8px;color:var(--t3)" onclick="clearAssetGroups(\''+escH(fundKey)+'\')">초기화</button>':''}`:''}
       </div>`;
 
 
@@ -4661,6 +4818,7 @@ function getNoticeStatus(n){
 function stab(t){S.activeTab=t;R();}
 
 function eF(label){
+  if(_userRole==='viewer') return;
   const n=S.notices.find(x=>x.id===S.activeNoticeId);if(!n)return;
   const nv=prompt(label+' 수정:','');if(nv===null)return;
   const m={'Notice Number':'notice_number','Notice Title':'notice_title','Issue Date':'issue_date','Due Date':'due_date',
@@ -4798,6 +4956,7 @@ function autoFillLp(mode){
 }
 
 function deleteNotice(id){
+  if(_userRole==='viewer') return;
   if(!confirm('이 Notice를 삭제하시겠습니까?'))return;
   authFetch(`${API}/api/notices/${id}`,{method:'DELETE'}).catch(e=>console.warn('Delete failed:',e));
   S.notices=S.notices.filter(n=>n.id!==id);
@@ -4806,6 +4965,7 @@ function deleteNotice(id){
 }
 
 async function reparseNotice(id){
+  if(_userRole==='viewer') return;
   if(!confirm('이 Notice를 저장된 PDF로 재파싱하시겠습니까?\n기존 파싱 결과가 덮어씌워집니다.'))return;
   const oldNotice=S.notices.find(n=>n.id===id);
   const oldFileName=oldNotice?oldNotice.fileName:'';
@@ -4883,6 +5043,7 @@ async function reparseNotice(id){
 }
 
 function deleteFund(fi){
+  if(_userRole==='viewer') return;
   const ids=window._fundNoticeIds&&window._fundNoticeIds[fi];
   const name=window._fundNames&&window._fundNames[fi];
   if(!ids||!ids.length) return;
@@ -4973,6 +5134,11 @@ async function uploadToBackend(job){
     const formData=new FormData();
     formData.append('file', job._file||job.file);
     if(S.geminiModel) formData.append('model', S.geminiModel);
+    // Admin: pass target org_id
+    if(_userRole==='admin'){
+      const orgSel=document.getElementById('uploadOrgSelect');
+      if(orgSel&&orgSel.value) formData.append('org_id', orgSel.value);
+    }
     // Keep file reference for retries — only clear on success
     if(job.file){job._file=job.file;job.file=null;}
 
