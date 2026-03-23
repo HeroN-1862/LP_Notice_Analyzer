@@ -659,6 +659,12 @@ function sbCollapseAll(){
 
 function renderSB(){
   const notices = S.notices;
+  // Pre-compute favorites-filtered count for sidebar header
+  if(S._favoritesActive && S._favorites.length){
+    window._sbFilteredCount=notices.filter(n=>S._favorites.some(f=>f.toLowerCase()===(n.header.Fund_ID_Key||'').toLowerCase())).length;
+  } else {
+    window._sbFilteredCount=notices.length;
+  }
   const activeJobs = S.jobs.filter(j=>j.status==='reading'||j.status==='pending'||j.status==='processing');
   const errorJobs = S.jobs.filter(j=>j.status==='error');
   const uploadBadge = activeJobs.length
@@ -675,7 +681,7 @@ function renderSB(){
         ${S._favorites.length?`<span class="badge ok">${S._favorites.length}</span>`:''}</div>
       ${_userRole==='admin'?`<div class="sb-it ${S.page==='admin'?'act':''}" onclick="goAdmin()"><span class="ic">👤</span><span>사용자 관리</span></div>`:''}
       ${notices.length?`<div class="sb-div"></div><div class="sb-gl" style="display:flex;align-items:center;justify-content:space-between">
-        <span>Notices (${_sbFilteredCount!==undefined?_sbFilteredCount:notices.length})</span>
+        <span>Notices (${window._sbFilteredCount!==undefined?window._sbFilteredCount:notices.length})</span>
         <span onclick="sbCollapseAll()" style="cursor:pointer;font-size:10px;color:var(--t3);padding:2px 6px;border-radius:3px;border:1px solid var(--bdr);user-select:none;transition:all .12s" onmouseover="this.style.color='var(--t1)'" onmouseout="this.style.color='var(--t3)'" title="${_sbAllCollapsed?'모든 펀드 Notice 펼치기':'모든 펀드 Notice 접기'}">${_sbAllCollapsed?'펼치기':'접기'}</span>
       </div>`:''}
     </div>
