@@ -2460,15 +2460,20 @@ async def save_asset_groups(fund_key: str, body: dict, request: Request):
 # ── Auth Info ──────────────────────────────────────────
 @app.get("/api/auth/me")
 async def auth_me(request: Request):
-    """Return current user info + role + org."""
+    """Return current user info + role + org + name."""
     user = await get_current_user(request)
     org = None
     if user.get("org_id"):
         org_row = db_get("organizations", user["org_id"])
         if org_row:
             org = {"id": org_row["id"], "name": org_row["name"]}
+    # Fetch name fields
+    role_row = db_get("user_roles", user["id"], id_col="user_id")
+    name_en = f"{role_row.get('name_en_first','')} {role_row.get('name_en_last','')}".strip() if role_row else ""
+    name_kr = f"{role_row.get('name_kr_last','')}{role_row.get('name_kr_first','')}".strip() if role_row else ""
     return {"id": user["id"], "email": user["email"], "role": user["role"],
-            "org_id": user.get("org_id"), "org": org}
+            "org_id": user.get("org_id"), "org": org,
+            "name_en": name_en, "name_kr": name_kr}
 
 
 # ── Organizations API ─────────────────────────────────
@@ -2482,10 +2487,16 @@ async def list_organizations():
 
 @app.post("/api/auth/register-org")
 async def register_org(body: dict, request: Request):
-    """Assign org to user after signup. Creates new org if org_name provided."""
+    """Assign org + name to user after signup. Creates new org if org_name provided."""
     user = await get_current_user(request)
     org_id = body.get("org_id")
     org_name = body.get("org_name", "").strip()
+
+    # Name fields
+    name_en_last = body.get("name_en_last", "").strip()
+    name_en_first = body.get("name_en_first", "").strip()
+    name_kr_last = body.get("name_kr_last", "").strip()
+    name_kr_first = body.get("name_kr_first", "").strip()
 
     if not org_id and not org_name:
         raise HTTPException(400, "org_id or org_name required")
@@ -2501,8 +2512,13 @@ async def register_org(body: dict, request: Request):
             org_id = new_id
             print(f"  [ORG] New organization created: {org_name} ({new_id})")
 
-    # Update user's org_id
-    db_update("user_roles", {"org_id": org_id}, user["id"], id_col="user_id")
+    # Update user's org_id + name
+    update_data = {"org_id": org_id}
+    if name_en_last: update_data["name_en_last"] = name_en_last
+    if name_en_first: update_data["name_en_first"] = name_en_first
+    if name_kr_last: update_data["name_kr_last"] = name_kr_last
+    if name_kr_first: update_data["name_kr_first"] = name_kr_first
+    db_update("user_roles", update_data, user["id"], id_col="user_id")
     return {"ok": True, "org_id": org_id}
 
 
@@ -2563,6 +2579,8 @@ async def admin_list_users(request: Request):
             "role": r.get("role", "uploader"),
             "org_id": org_id,
             "org_name": org_row["name"] if org_row else "",
+            "name_en": f"{r.get('name_en_first','')} {r.get('name_en_last','')}".strip(),
+            "name_kr": f"{r.get('name_kr_last','')}{r.get('name_kr_first','')}".strip(),
             "created_at": r.get("created_at"),
         })
     return result
