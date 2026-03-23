@@ -764,16 +764,14 @@ function renderSB(){
       })()}
     </nav>
     <div class="sb-foot">
-      ${_session?`<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-        <div style="font-size:10px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px" title="${escH(_session.user?.email||'')}">${escH(_session.user?.email||'')}</div>
-        <div style="display:flex;gap:4px">
-          <div class="sb-it" style="padding:3px 8px;margin:0;font-size:11px;gap:4px;cursor:pointer;border-radius:4px;${S.page==='settings'?'background:var(--bg4);font-weight:600':''}" onclick="go('settings')"><span class="ic" style="font-size:12px">⚙</span><span>설정</span></div>
-          <div class="sb-it" style="padding:3px 8px;margin:0;font-size:11px;gap:4px;cursor:pointer;border-radius:4px;color:var(--t3)" onclick="doLogout()"><span class="ic" style="font-size:11px">↪</span><span>로그아웃</span></div>
-        </div>
+      ${_session?`<div style="font-size:11px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-bottom:8px;padding:0 2px" title="${escH(_session.user?.email||'')}">${escH(_session.user?.email||'')}</div>
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+        <button class="btn btn-sm btn-s" style="flex:1;font-size:11px;padding:5px 0;${S.page==='settings'?'background:var(--bg4);font-weight:600':''}" onclick="go('settings')">⚙ 설정</button>
+        <button class="btn btn-sm btn-s" style="flex:1;font-size:11px;padding:5px 0;color:var(--t3)" onclick="doLogout()">로그아웃</button>
+        ${_userRole==='admin'?'<span style="font-size:9px;color:var(--indigo);font-weight:700;background:var(--indigo-d);padding:3px 7px;border-radius:3px;flex-shrink:0">ADMIN</span>':''}
       </div>`:''}
-      <div style="display:flex;align-items:center;justify-content:space-between">
-        <div>${S.connected?`<span style="color:var(--teal);font-size:11px">● 연결됨</span>`:'<span style="color:var(--red);font-size:11px">● 연결 안됨</span>'}</div>
-        ${_userRole==='admin'?'<span style="font-size:9px;color:var(--indigo);font-weight:600;background:var(--indigo-d);padding:1px 5px;border-radius:3px">ADMIN</span>':''}
+      <div style="padding:0 2px">
+        ${S.connected?'<span style="color:var(--teal);font-size:11px">● 연결됨</span>':'<span style="color:var(--red);font-size:11px">● 연결 안됨</span>'}
       </div>
     </div>`;
 }
@@ -797,6 +795,7 @@ function goAdmin(){
     S._savedNotices=null;
     S._adminViewUser=null;
   }
+  S._adminUsers=[]; // clear cache to trigger fresh load
   S.page='admin';R();
 }
 function toggleSbFund(idx){const k=window._sbFundKeys[idx];S.sbOpen[k]=S.sbOpen[k]===false?true:false;R();}
@@ -845,7 +844,7 @@ function renderPG(){
     case'upload':h.innerHTML='<h1>PDF 업로드</h1><p>Notice PDF를 업로드하면 자동 분석 후 누적 관리됩니다</p>';b.innerHTML=pgUpload();break;
     case'portfolio':h.innerHTML=`<h1>Portfolio Overview</h1><p>${S.notices.length}건의 Notice · Fund → LP → Class 계층 구조</p>`;b.innerHTML=pgPortfolio();break;
     case'result':renderResultPG(h,b);break;
-    case'admin':h.innerHTML='<h1>사용자 관리</h1><p>가입된 사용자 목록 및 데이터 관리</p>';b.innerHTML=pgAdmin();loadAdminUsers();break;
+    case'admin':h.innerHTML='<h1>사용자 관리</h1><p>가입된 사용자 목록 및 데이터 관리</p>';b.innerHTML=pgAdmin();if(!S._adminUsers.length)loadAdminUsers();break;
   }
   // Global popups — render regardless of current page
   let globalPopups='';
@@ -993,12 +992,16 @@ function renderAdminNoticeList(){
   }).join('');
 }
 
+let _adminLoading=false;
 async function loadAdminUsers(){
+  if(_adminLoading) return;
+  _adminLoading=true;
   try{
     const r=await authFetch(`${API}/api/admin/users`);
     if(r.ok) S._adminUsers=await r.json();
-    R();
+    if(S.page==='admin') R();
   }catch(e){console.warn('Admin users load failed:',e);}
+  finally{_adminLoading=false;}
 }
 
 async function adminViewUser(uid){
@@ -4813,7 +4816,7 @@ async function reparseNotice(id){
 
   try{
     const url=`${API}/api/notices/${id}/reparse${S.geminiModel?'?model='+encodeURIComponent(S.geminiModel):''}`;
-    const resp=await fetch(url,{method:'POST'});
+    const resp=await authFetch(url,{method:'POST'});
     if(!resp.ok){
       const msg=resp.status===404?'PDF 원본 파일이 서버에 없습니다. 재업로드가 필요합니다.':'서버 오류 '+resp.status;
       throw new Error(msg);
@@ -5168,7 +5171,7 @@ async function resolveDuplicate(action){
       job.status='processing'; R();
       try{
         const url=`${API}/api/notices/${info.existingId}/reparse${S.geminiModel?'?model='+encodeURIComponent(S.geminiModel):''}`;
-        const resp=await fetch(url,{method:'POST'});
+        const resp=await authFetch(url,{method:'POST'});
         if(!resp.ok) throw new Error(`서버 오류 ${resp.status}`);
 
         const reader=resp.body.getReader();
@@ -5255,7 +5258,7 @@ function rDuplicatePopup(){
     <div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:var(--rl);padding:0;width:95%;max-width:480px">
       <div style="padding:16px 20px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;gap:8px">
         <span style="font-size:16px">⚠️</span>
-        <div><div style="font-size:14px;font-weight:700">동일한 Notice가 ${isExact?'이미 업로드되어 있습니다':'이미 존재합니다'}</div>
+        <div><div style="font-size:14px;font-weight:700">동일한 ${isExact?'Notice가 이미 업로드되어 있습니다':'내용의 Notice가 이미 존재합니다'}</div>
           <div style="font-size:11px;color:var(--t3);margin-top:2px">처리할 방법을 선택하세요</div></div>
       </div>
       <div style="padding:16px 20px">
@@ -5273,8 +5276,7 @@ function rDuplicatePopup(){
             <span style="font-size:11px;color:var(--amber);font-weight:600">↻ 대체</span>
           </div>
           <div style="font-size:12px;font-weight:600;color:var(--t1)">${escH(job.fileName)}</div>
-          ${isExact?'<div style="font-size:11px;color:var(--amber);margin-top:2px">동일 PDF를 AI로 재분석합니다 (비용 발생)</div>'
-            :'<div style="font-size:11px;color:var(--amber);margin-top:2px">기존 Notice를 삭제하고 새 결과로 교체합니다</div>'}
+          <div style="font-size:11px;color:var(--amber);margin-top:2px">동일 PDF를 AI로 재분석합니다</div>
         </div>
       </div>
     </div>
