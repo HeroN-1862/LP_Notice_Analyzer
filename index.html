@@ -5162,7 +5162,7 @@ async function uploadToBackend(job){
   try{
     job.tReadDone=Date.now();
     job.status='processing';
-    R();
+    if(!updateJobCard(job.id)) R();
 
     const formData=new FormData();
     formData.append('file', job._file||job.file);
@@ -5791,14 +5791,13 @@ R();
   }catch(e){S.connected=false;S.page='settings';R();}
 })();
 
-/* Live timer */
+/* Live timer — update job timing display without full DOM rebuild */
 setInterval(()=>{
   const now=Date.now();
-  let needsRerender=false;
   S.jobs.forEach(j=>{
     if(j.status!=='reading'&&j.status!=='processing') return;
     const el=document.getElementById('jt_'+j.id);
-    if(!el){needsRerender=true;return;}
+    if(!el) return;  // Element not in DOM yet — wait for next R() cycle, don't force re-render
     const elapsed=((now-j.t0)/1000).toFixed(0);
     const tRead=j.tReadDone?((j.tReadDone-j.t0)/1000).toFixed(1):null;
     const aiElapsed=j.tParsingStart?((now-j.tParsingStart)/1000).toFixed(0):null;
@@ -5808,7 +5807,6 @@ setInterval(()=>{
       +(tRead!=null?' • 📤전송 '+tRead+'s':'')
       +(aiElapsed!=null?' • 🤖AI '+aiElapsed+'s/180s':serverElapsed!=null?' • 🌐서버 '+serverElapsed+'s...':'');
   });
-  if(needsRerender && S.page==='upload'){renderPG();bindEv();}
 },1000);
 </script>
 </body>
