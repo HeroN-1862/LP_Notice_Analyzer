@@ -286,20 +286,27 @@ def _make_duplicate_key(header: dict) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
-def _find_duplicate(pdf_hash: str, header: dict = None):
-    """Check for duplicates. Returns (type, existing_row) or (None, None).
+def _find_duplicate(pdf_hash: str, header: dict = None, user_id: str = None):
+    """Check for duplicates within the same user's notices.
+    Returns (type, existing_row) or (None, None).
     type: 'exact' (same file bytes) or 'content' (same parsed header fields)."""
     # Phase 1: exact binary match (cheapest — no AI needed)
     if pdf_hash:
-        r = db_find("notices", "pdf_hash", pdf_hash)
-        if r:
-            return "exact", r
+        q = get_supa().table("notices").select("*").eq("pdf_hash", pdf_hash)
+        if user_id:
+            q = q.eq("user_id", user_id)
+        r = q.limit(1).execute()
+        if r.data:
+            return "exact", r.data[0]
     # Phase 3: content-based match (after AI parsing)
     if header:
         dup_key = _make_duplicate_key(header)
-        r = db_find("notices", "duplicate_key", dup_key)
-        if r:
-            return "content", r
+        q = get_supa().table("notices").select("*").eq("duplicate_key", dup_key)
+        if user_id:
+            q = q.eq("user_id", user_id)
+        r = q.limit(1).execute()
+        if r.data:
+            return "content", r.data[0]
     return None, None
 
 
@@ -1365,7 +1372,7 @@ async def upload_notice(
             pdf_hash = hashlib.md5(pdf_bytes).hexdigest()[:12]
 
             # Phase 1: exact binary duplicate check (before AI — cost = 0)
-            dup_type, dup_row = _find_duplicate(pdf_hash)
+            dup_type, dup_row = _find_duplicate(pdf_hash, user_id=user["id"])
             if dup_type == "exact":
                 existing_header = dup_row["header"] if isinstance(dup_row["header"], dict) else json.loads(dup_row["header"])
                 yield f"data: {json.dumps({'stage': 'exact_duplicate', 'existing_id': dup_row['id'], 'existing_file_name': dup_row['file_name'], 'existing_date': existing_header.get('issue_date',''), 'existing_fund': existing_header.get('Underlying_Fund_Name_short',''), 'existing_net': existing_header.get('LP_net_amount')}, ensure_ascii=False)}\n\n"
@@ -1424,7 +1431,7 @@ async def upload_notice(
 
             # Phase 3: content-based duplicate check (after AI parsing)
             dup_key = _make_duplicate_key(header)
-            dup_type2, dup_row2 = _find_duplicate(None, header)
+            dup_type2, dup_row2 = _find_duplicate(None, header, user_id=user["id"])
             if dup_type2 == "content":
                 # AI already spent — save result to pending, let user decide
                 elapsed = int((time.time() - t0) * 1000)
@@ -1861,7 +1868,8 @@ async def parse_multi_lp(
                 # sub-notices because sub_id contains a timestamp-based notice_id.
                 dup_key = _make_duplicate_key(header)
                 is_dup = False
-                existing = db_find("notices", "duplicate_key", dup_key)
+                _dup_q = get_supa().table("notices").select("*").eq("duplicate_key", dup_key).eq("user_id", user["id"]).limit(1).execute()
+                existing = _dup_q.data[0] if _dup_q.data else None
                 if existing and existing["id"] != sub_id:
                     is_dup = True
                     print(f"  [DUP] LP {lp_code}: content duplicate of "
