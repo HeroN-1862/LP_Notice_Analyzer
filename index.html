@@ -499,6 +499,7 @@ const S = {
   _favoritesActive: false,
   _adminOrgFilter: null, // admin org filter: org_id or 'all'
   _adminOrgs: [],        // admin org list cache
+  _orgAssign: null,      // org assignment popup data
 };
 let _noticeCounter = 0;
 let _batchCounter = 0;
@@ -510,6 +511,8 @@ async function loadFromBackend(){
     if(!resp.ok) return;
     const data=await resp.json();
     S.notices=data;
+    // Store org_id for admin org assignment
+    S.notices.forEach(n=>{ n._raw_org_id = n.org_id || ''; });
     if(S.notices.length) S.page='portfolio';
     // Rebuild name registry + derive missing fields (2-pass: cross-ref needs all notices loaded first)
     S.notices.forEach(n=>{normalizeNames(n.header);deriveHeaderFields(n.header);});
@@ -897,6 +900,7 @@ function renderPG(){
   if(S.showDuplicate && S.page!=='result') globalPopups+=rDuplicatePopup();
   if(S.showLpMove) globalPopups+=rLpMovePopup();
   if(S.showFundMerge) globalPopups+=rFundMergePopup();
+  if(S._orgAssign) globalPopups+=rOrgAssignPopup();
   if(globalPopups){
     let gp=document.getElementById('_globalPopups');
     if(!gp){gp=document.createElement('div');gp.id='_globalPopups';document.body.appendChild(gp);}
@@ -1104,10 +1108,91 @@ async function adminFilterOrg(orgId){
     const r=await authFetch(url);
     if(r.ok){
       S.notices=await r.json();
+      S.notices.forEach(n=>{ n._raw_org_id = n.org_id || ''; });
       S.notices.forEach(n=>{normalizeNames(n.header);deriveHeaderFields(n.header);});
     }
   }catch(e){}
   R();
+}
+
+/* ===== ORG ASSIGNMENT POPUP (Admin only) ===== */
+function showOrgAssign(noticeId){
+  const n=S.notices.find(x=>x.id===noticeId);
+  if(!n) return;
+  S._orgAssign={noticeId, currentOrg: n.header?._org_id_display || '', fileName: n.fileName,
+    fund: n.header?.Underlying_Fund_Name_short||'', date: n.header?.issue_date||''};
+  R();
+}
+
+function rOrgAssignPopup(){
+  const d=S._orgAssign; if(!d) return'';
+  const orgs=(S._adminOrgs||[]).filter(o=>!o.is_system);
+  // Find current notice org
+  const n=S.notices.find(x=>x.id===d.noticeId);
+  const curOrg=n?._raw_org_id||'';
+  return`<div class="mo-bg" onclick="if(event.target===this){S._orgAssign=null;R();}">
+    <div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:var(--rl);padding:0;width:95%;max-width:440px">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--bdr);display:flex;align-items:center;gap:8px">
+        <span style="font-size:16px">🏢</span>
+        <div><div style="font-size:14px;font-weight:700">기관 배정</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:2px">${escH(d.fund)} · ${fmtDate(d.date)||''}</div></div>
+      </div>
+      <div style="padding:16px 20px">
+        <div style="font-size:11px;color:var(--t3);margin-bottom:12px">파일: ${escH(d.fileName)}</div>
+        <div style="font-size:12px;font-weight:600;color:var(--t2);margin-bottom:8px">대상 기관 선택</div>
+        ${orgs.map(o=>{
+          const isCurrent=o.id===curOrg;
+          return`<label style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--bg4);cursor:pointer;${isCurrent?'opacity:.5':''}">
+            <input type="checkbox" class="oa-cb" data-org="${o.id}" ${isCurrent?'checked disabled':''} style="width:16px;height:16px"/>
+            <span style="flex:1;font-size:13px;font-weight:500">${escH(o.name)}</span>
+            ${isCurrent?'<span style="font-size:10px;color:var(--t3)">현재 소속</span>':''}
+          </label>`;
+        }).join('')}
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="btn btn-sm btn-s" style="flex:1" onclick="execOrgAssign('move')" title="선택한 기관 1곳으로 이동 (원본 org 변경)">📦 이동</button>
+          <button class="btn btn-sm btn-p" style="flex:1" onclick="execOrgAssign('copy')" title="선택한 기관에 각각 복사본 생성">📋 복사</button>
+          <button class="btn btn-sm btn-s" onclick="S._orgAssign=null;R()">취소</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function execOrgAssign(mode){
+  const d=S._orgAssign; if(!d) return;
+  const cbs=document.querySelectorAll('.oa-cb:not(:disabled)');
+  const selected=[];
+  cbs.forEach(cb=>{if(cb.checked)selected.push(cb.dataset.org);});
+  if(!selected.length){alert('기관을 선택해주세요');return;}
+
+  try{
+    if(mode==='move'){
+      if(selected.length>1){alert('이동은 1개 기관만 선택 가능합니다');return;}
+      if(!confirm(`이 Notice를 "${(S._adminOrgs||[]).find(o=>o.id===selected[0])?.name||selected[0]}"(으)로 이동하시겠습니까?`))return;
+      await authFetch(`${API}/api/admin/notices/${d.noticeId}/move`,{
+        method:'PUT',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({org_id:selected[0]})
+      });
+      // Update local state
+      const n=S.notices.find(x=>x.id===d.noticeId);
+      if(n) n._raw_org_id=selected[0];
+    } else {
+      if(!confirm(`이 Notice를 ${selected.length}개 기관에 복사하시겠습니까?`))return;
+      const resp=await authFetch(`${API}/api/admin/notices/${d.noticeId}/copy`,{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({org_ids:selected})
+      });
+      const result=await resp.json();
+      if(result.created&&result.created.length){
+        alert(`${result.created.length}개 기관에 복사 완료:\n${result.created.map(c=>c.org_name).join(', ')}`);
+      }
+    }
+    S._orgAssign=null;
+    // Reload notices to reflect changes
+    await loadFromBackend();
+  }catch(e){
+    alert('기관 배정 실패: '+e.message);
+  }
 }
 
 /* ===== ADMIN PAGE ===== */
@@ -2085,6 +2170,7 @@ function renderResultPG(hEl,bEl){
       ${voidsInfo?`<div>${voidsInfo}</div>`:''}
     </div>
     <div style="display:flex;gap:6px;flex-shrink:0">
+      ${_userRole==='admin'?`<button style="padding:4px 10px;font-size:11px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;transition:all .15s" onclick="showOrgAssign('${n.id}')" onmouseover="this.style.borderColor='var(--blue)';this.style.color='var(--blue)'" onmouseout="this.style.borderColor='';this.style.color='var(--t3)'" title="기관 배정 (이동/복사)">🏢 기관 배정</button>`:''}
       ${_userRole!=='viewer'?`<button style="padding:4px 10px;font-size:11px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;transition:all .15s" onclick="reparseNotice('${n.id}')" onmouseover="this.style.borderColor='var(--indigo)';this.style.color='var(--indigo)'" onmouseout="this.style.borderColor='';this.style.color='var(--t3)'" title="저장된 PDF로 AI 재파싱 (재업로드 불필요)">↻ 재파싱</button>
       <button class="btn-danger" onclick="deleteNotice('${n.id}')">삭제</button>`:''}
     </div></div>`;

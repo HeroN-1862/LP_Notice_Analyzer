@@ -2005,6 +2005,7 @@ async def list_notices(request: Request, org_id: Optional[str] = Query(None)):
             "header": header, "lineItems": line_items,
             "is_voided": bool(r.get("is_voided")), "voided_by": r.get("voided_by"),
             "page_count": r.get("page_count") or 0,
+            "org_id": r.get("org_id", ""),
         })
     return result
 
@@ -2638,6 +2639,90 @@ async def admin_delete_user(uid: str, request: Request):
     try: db_delete("user_roles", uid, id_col="user_id")
     except: pass
     return {"ok": True}
+
+
+# ── Admin Notice Assignment ───────────────────────────
+
+@app.put("/api/admin/notices/{notice_id}/move")
+async def admin_move_notice(notice_id: str, body: dict, request: Request):
+    """Move a notice to a different organization. Admin only."""
+    admin = await require_admin(request)
+    target_org = body.get("org_id", "")
+    if not target_org:
+        raise HTTPException(400, "org_id required")
+    # Verify notice exists
+    r = db_get("notices", notice_id)
+    if not r:
+        raise HTTPException(404, "Notice not found")
+    # Verify target org exists
+    org = db_get("organizations", target_org)
+    if not org:
+        raise HTTPException(404, "Organization not found")
+    # Update org_id
+    db_update("notices", {"org_id": target_org}, notice_id)
+    print(f"  [ADMIN] Moved notice {notice_id} → {target_org}")
+    return {"ok": True, "notice_id": notice_id, "org_id": target_org}
+
+
+@app.post("/api/admin/notices/{notice_id}/copy")
+async def admin_copy_notice(notice_id: str, body: dict, request: Request):
+    """Copy a notice to one or more organizations. Admin only.
+    Creates independent copies (separate DB records + storage files)."""
+    admin = await require_admin(request)
+    target_orgs = body.get("org_ids", [])
+    if not target_orgs:
+        raise HTTPException(400, "org_ids required (list)")
+
+    # Verify source notice
+    r = db_get("notices", notice_id)
+    if not r:
+        raise HTTPException(404, "Notice not found")
+
+    header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
+    line_items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
+
+    created = []
+    for org_id in target_orgs:
+        org = db_get("organizations", org_id)
+        if not org or org.get("is_system"):
+            continue
+        # Skip if same org as source
+        if org_id == r.get("org_id"):
+            continue
+        # Check if duplicate already exists in target org
+        if r.get("duplicate_key"):
+            existing = get_supa().table("notices").select("id").eq("duplicate_key", r["duplicate_key"]).eq("org_id", org_id).limit(1).execute()
+            if existing.data:
+                print(f"  [ADMIN] Skip copy to {org_id}: duplicate exists ({existing.data[0]['id']})")
+                continue
+
+        # Generate new notice ID
+        new_id = f"{notice_id}_cp{org_id[-8:]}"
+        # Remove if somehow exists
+        try: db_delete("notices", new_id)
+        except: pass
+
+        # Copy DB record
+        db_insert("notices", {
+            "id": new_id,
+            "file_name": r.get("file_name", ""),
+            "user_id": admin["id"],
+            "org_id": org_id,
+            "header": header,
+            "line_items": line_items,
+            "raw_ai_response": r.get("raw_ai_response", ""),
+            "pdf_hash": r.get("pdf_hash", ""),
+            "page_count": r.get("page_count", 0),
+            "duplicate_key": r.get("duplicate_key", ""),
+        })
+
+        # Copy storage files (PDF + text_map)
+        copy_storage(notice_id, new_id)
+
+        created.append({"notice_id": new_id, "org_id": org_id, "org_name": org["name"]})
+        print(f"  [ADMIN] Copied notice {notice_id} → {new_id} (org: {org_id})")
+
+    return {"ok": True, "source_id": notice_id, "created": created}
 
 
 # ── Health ──────────────────────────────────────────────
