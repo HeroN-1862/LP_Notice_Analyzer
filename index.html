@@ -1921,8 +1921,8 @@ function renderResultPG(hEl,bEl){
       <!-- LEFT: Tab Bar + Content -->
       <div>
         <div class="result-tabs">
-          <div class="result-tab ${S.resultTab==='notice'||!S.resultTab?'act':''}" onclick="S.resultTab='notice';if(S.rightPanel==='hide')S.rightPanel='pdf';R()">Notice</div>
-          <div class="result-tab ${S.resultTab==='wire'?'act':''}" onclick="S.resultTab='wire';if(S.rightPanel==='hide')S.rightPanel='pdf';R()">Wire Info</div>
+          <div class="result-tab ${S.resultTab==='notice'||!S.resultTab?'act':''}" onclick="S.resultTab='notice';R()">Notice</div>
+          <div class="result-tab ${S.resultTab==='wire'?'act':''}" onclick="S.resultTab='wire';R()">Wire Info</div>
           <div class="result-tab ${S.resultTab==='exposure'?'act':''}" onclick="S.resultTab='exposure';S.rightPanel='hide';R()">Exposure</div>
         </div>
         ${S.resultTab==='wire'?rWireInfo(n):S.resultTab==='exposure'?rExposure(n):`
