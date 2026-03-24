@@ -13,6 +13,10 @@
     window.pdfjsLib = m;
   });
 </script>
+<!-- SheetJS for Excel/CSV export -->
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<!-- JSZip for CSV multi-file export -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
 :root{
   --bg0:#f5f6f8;--bg1:#ffffff;--bg2:#ffffff;--bg3:#f9fafb;--bg4:#f0f2f5;
@@ -413,6 +417,7 @@ async function loadUserRole() {
     if (r.ok) {
       const d = await r.json();
       _userRole = d.role || 'uploader';
+      console.log('[AUTH] role=', _userRole, 'org=', d.org_id||'none');
       S._userOrg = d.org || null;
       S._adminViewUser = null;
     }
@@ -518,6 +523,7 @@ const S = {
   _orgAssign: null,      // org assignment popup data
   _noticeOrgMap: null,   // admin portfolio management data
   _lpEdit: null,         // LP edit popup data
+  _exportPopup: null,    // export popup: {format:'xlsx', scope:'current'}
 };
 let _noticeCounter = 0;
 let _batchCounter = 0;
@@ -694,11 +700,11 @@ function renderSB(){
     ? `<span class="badge proc">${S.jobs.filter(j=>j.status==='done').length+activeJobs.length>1? (S.jobs.filter(j=>j.status==='done').length)+'/'+S.jobs.length : '분석중'}</span>`
     : errorJobs.length ? `<span class="badge err">${errorJobs.length} err</span>` : '';
   document.getElementById('sb').innerHTML=`
-    <div class="sb-head"><div class="sb-logo" onclick="if(_session){S.page=S.notices.length?'portfolio':'upload';S.activeNoticeId=null;R();}else{location.reload();}" style="cursor:pointer" title="홈"><i>N</i><span>Notice Analyzer</span></div></div>
+    <div class="sb-head"><div class="sb-logo" onclick="if(_session){S.page=(S.notices.length||_userRole==='admin')?'portfolio':'upload';S.activeNoticeId=null;R();}else{location.reload();}" style="cursor:pointer" title="홈"><i>N</i><span>Notice Analyzer</span></div></div>
     <div style="padding:4px 6px 0">
       <div class="sb-gl">메뉴</div>
       <div class="sb-it ${S.page==='upload'?'act':''} ${!S.connected||_userRole==='viewer'?'dis':''}" onclick="${_userRole==='viewer'?'alert(&quot;열람 전용 계정입니다&quot;)':'go(&quot;upload&quot;)'}" ${_userRole==='viewer'?'title="열람 전용 계정"':''}><span class="ic">+</span><span>PDF 업로드</span>${uploadBadge}</div>
-      <div class="sb-it ${S.page==='portfolio'?'act':''} ${!notices.length?'dis':''}" onclick="go('portfolio')"><span class="ic">◈</span><span>Portfolio</span>
+      <div class="sb-it ${S.page==='portfolio'?'act':''} ${!notices.length&&_userRole!=='admin'?'dis':''}" onclick="go('portfolio')"><span class="ic">◈</span><span>Portfolio</span>
         ${notices.length?`<span class="badge ok">${notices.length}</span>`:''}</div>
       <div class="sb-it ${S.page==='favorites'?'act':''}" onclick="go('favorites')"><span class="ic">★</span><span>Favorites</span>
         ${favs.length?`<span class="badge ok">${favs.length}</span>`:''}</div>
@@ -841,7 +847,7 @@ function renderSB(){
 
 function go(p){
   if(p==='upload'&&!S.connected)return;
-  if(p==='portfolio'&&!S.notices.length)return;
+  if(p==='portfolio'&&!S.notices.length&&_userRole!=='admin')return;
   // Restore own notices when leaving admin user view
   if(S._adminViewUser && S._savedNotices){
     S.notices=S._savedNotices;
@@ -908,7 +914,7 @@ function renderPG(){
   switch(S.page){
     case'settings':h.innerHTML='<h1>설정</h1><p>서버 연결 · AI 모델 · Temperature</p>';b.innerHTML=pgSettings();loadGeminiModels();break;
     case'upload':h.innerHTML='<h1>PDF 업로드</h1><p>Notice PDF를 업로드하면 자동 분석 후 누적 관리됩니다</p>';b.innerHTML=pgUpload();if(_userRole==='admin'&&!S._adminOrgs.length)loadAdminOrgs();break;
-    case'portfolio':h.innerHTML=`<h1>Portfolio Overview</h1><p>${S.notices.length}건의 Notice · Fund → LP → Class 계층 구조</p>`;b.innerHTML=(_userRole==='admin'?pgAdminOrgCards():'')+pgPortfolio();if(_userRole==='admin'&&!S._adminOrgs.length)loadAdminOrgs();break;
+    case'portfolio':h.innerHTML=`<h1>Portfolio Overview</h1><p>${S.notices.length}건의 Notice · Fund → LP → Class 계층 구조</p>`;b.innerHTML=(_userRole==='admin'?pgAdminOrgCards():'')+pgPortfolio();if(_userRole==='admin'){if(!S._adminOrgs.length)loadAdminOrgs();if(!S.notices.length&&!S._adminOrgFilter)adminFilterOrg('all');}break;
     case'favorites':h.innerHTML='<h1>★ 담당 펀드 설정</h1><p>관심 펀드를 선택하면 사이드바에 해당 펀드의 Notice만 표시됩니다</p>';b.innerHTML=pgFavorites();break;
     case'result':renderResultPG(h,b);break;
     case'admin':h.innerHTML='<h1>사용자 관리</h1><p>가입된 사용자 목록 및 데이터 관리</p>';b.innerHTML=pgAdmin();if(!S._adminUsers.length)loadAdminUsers();break;
@@ -922,6 +928,7 @@ function renderPG(){
   if(S.showFundMerge) globalPopups+=rFundMergePopup();
   if(S._orgAssign) globalPopups+=rOrgAssignPopup();
   if(S._lpEdit) globalPopups+=rLpEditPopup();
+  if(S._exportPopup) globalPopups+=rExportPopup();
   if(globalPopups){
     let gp=document.getElementById('_globalPopups');
     if(!gp){gp=document.createElement('div');gp.id='_globalPopups';document.body.appendChild(gp);}
@@ -1769,7 +1776,7 @@ function pgPortfolio(){
               ondragleave="this.style.background='';this.style.outline=''"
               ondrop="this.style.background='';this.style.outline='';handleNoticeDropOnLp(event,${fi},${li})">
               <div style="font-size:12px;font-weight:600;color:var(--t1)">${escH(lp.displayName)} ${lpCode?'· '+lpCode:''}
-                ${_userRole!=='viewer'?` <span onclick="event.stopPropagation();editLpInfo(${fi},${li})" style="cursor:pointer;font-size:10px;color:var(--t3);opacity:.5;padding:1px 6px;border-radius:3px;border:1px solid var(--bdr);background:var(--bg0)" onmouseover="this.style.opacity='1';this.style.color='var(--t1)'" onmouseout="this.style.opacity='.5';this.style.color='var(--t3)'" title="LP 정보 수정">LP 수정</span>`:''}</div>
+                ${(_userRole==='admin'||_userRole==='uploader')?` <span onclick="event.stopPropagation();editLpInfo(${fi},${li})" style="cursor:pointer;font-size:10px;color:var(--t3);opacity:.5;padding:1px 6px;border-radius:3px;border:1px solid var(--bdr);background:var(--bg0)" onmouseover="this.style.opacity='1';this.style.color='var(--t1)'" onmouseout="this.style.opacity='.5';this.style.color='var(--t3)'" title="LP 정보 수정">LP 수정</span>`:''}</div>
               <div style="display:flex;align-items:center;gap:12px;margin-top:6px;font-size:11px;color:var(--t2)">
                 ${commit?`<span>Commit: <b style="color:var(--t1)">${fA(commit)}</b></span>`:''}
                 ${pctUsed!==null?`<div style="width:60px;height:6px;background:var(--bdr);border-radius:3px;overflow:hidden"><div style="height:100%;width:${pctUsed}%;background:var(--teal);border-radius:3px"></div></div><span>${pctUsed}%</span>`:''}
@@ -2344,6 +2351,8 @@ function renderResultPG(hEl,bEl){
           <div class="result-tab ${S.resultTab==='wire'?'act':''}" onclick="S.resultTab='wire';R()">Wire Info</div>
           <div class="result-tab ${S.resultTab==='exposure'?'act':''}" onclick="S.resultTab='exposure';S.rightPanel='hide';R()">Exposure</div>
           <div class="result-tab ${S.resultTab==='commitment'?'act':''}" onclick="S.resultTab='commitment';S.rightPanel='hide';R()">Commitment</div>
+          <div style="flex:1"></div>
+          <div class="result-tab" onclick="openExportPopup()" style="font-size:11px;gap:3px;color:var(--t3)" title="Excel/CSV 내보내기">📥 Export</div>
         </div>
         ${S.resultTab==='wire'?rWireInfo(n):S.resultTab==='exposure'?rExposure(n):S.resultTab==='commitment'?rCommitment(n):`
         ${rDashboard(h,items)}
@@ -3746,7 +3755,7 @@ function rCommitment(n){
       </div>
       <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px">
         <span style="color:var(--indigo);font-weight:600">Funded: ${fA(latestFunded)} (${barPct.toFixed(1)}%)</span>
-        <span style="color:var(--t3)">Unfunded: ${fA(latestUnf)} (${latestPct!=null?(100-latestPct).toFixed(1)+'%':'')}</span>
+        <span style="color:var(--t3)">Unfunded: ${fA(latestUnf)} (${latestPct!=null?(100-latestPct).toFixed(1)+'%':''})</span>
       </div>
     </div>
     <div id="cmitTimeline" style="overflow-x:auto;padding:8px 0">
@@ -5270,6 +5279,439 @@ function submitLpEdit(){
   R();
 }
 
+/* ===== EXPORT TO EXCEL/CSV ===== */
+
+function openExportPopup(){
+  S._exportPopup={format:'xlsx', scope:'current'};
+  R();
+}
+
+function rExportPopup(){
+  const d=S._exportPopup; if(!d) return'';
+  const fmtBtn=(val,label)=>`<button onclick="S._exportPopup.format='${val}';R()" style="flex:1;padding:10px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;border:1px solid ${d.format===val?'var(--indigo)':'var(--bdr)'};background:${d.format===val?'var(--indigo-d)':'var(--bg2)'};color:${d.format===val?'var(--indigo)':'var(--t2)'}">${label}</button>`;
+  const scBtn=(val,label)=>`<button onclick="S._exportPopup.scope='${val}';R()" style="flex:1;padding:10px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;border:1px solid ${d.scope===val?'var(--indigo)':'var(--bdr)'};background:${d.scope===val?'var(--indigo-d)':'var(--bg2)'};color:${d.scope===val?'var(--indigo)':'var(--t2)'}">${label}</button>`;
+  return`<div class="mo-bg" onclick="if(event.target===this){S._exportPopup=null;R();}">
+    <div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:var(--rl);padding:0;width:95%;max-width:400px">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--bdr)">
+        <div style="font-size:15px;font-weight:700">📥 데이터 내보내기</div>
+      </div>
+      <div style="padding:20px">
+        <div style="font-size:12px;font-weight:600;color:var(--t2);margin-bottom:8px">파일 형식</div>
+        <div style="display:flex;gap:8px;margin-bottom:18px">
+          ${fmtBtn('xlsx','.xlsx')}
+          ${fmtBtn('csv','.csv')}
+        </div>
+        <div style="font-size:12px;font-weight:600;color:var(--t2);margin-bottom:8px">범위</div>
+        <div style="display:flex;gap:8px">
+          ${scBtn('current','현재 Notice만')}
+          ${scBtn('all','누적 Notice 모두')}
+        </div>
+      </div>
+      <div style="padding:12px 20px;border-top:1px solid var(--bdr);display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn btn-s" onclick="S._exportPopup=null;R()">취소</button>
+        <button class="btn btn-p" onclick="generateExport()">생성</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* 숫자를 Excel용 raw number로 변환 (HTML 태그 없이) */
+function _exNum(v){
+  const n=pN(v);
+  return n!=null?n:null;
+}
+
+/* 같은 Fund+LP notices 수집 (날짜순) */
+function _exFundLpNotices(notice){
+  const h=notice.header;
+  const fundKey=getFundKey(h);
+  const lpCode=h.LP_code||'';
+  const lpFull=h.LP_Name_full||'';
+  return S.notices.filter(x=>{
+    if(getFundKey(x.header)!==fundKey) return false;
+    if(lpCode) return (x.header.LP_code||'')===lpCode;
+    return (x.header.LP_Name_full||'')===lpFull;
+  }).sort((a,b)=>(fmtDate(a.header.issue_date||'')).localeCompare(fmtDate(b.header.issue_date||'')));
+}
+
+/* Notice 시트 생성 (1건) */
+function _exNoticeSheet(notice){
+  const h=notice.header;
+  const rows=[];
+  // Header section
+  rows.push(['Fund Name', h.Underlying_Fund_Name_full||h.Underlying_Fund_Name_short||'N/A']);
+  rows.push(['Notice Type', h.notice_type||'N/A']);
+  rows.push(['Notice Title', h.notice_title||'']);
+  rows.push(['Notice Number', h.notice_number||'']);
+  rows.push(['Issue Date', fmtDate(h.issue_date)||'N/A']);
+  rows.push(['Due Date', fmtDate(h.due_date)||'N/A']);
+  rows.push(['LP Name', h.LP_Name_full||h.LP_Name_short||'N/A']);
+  rows.push(['LP Code', h.LP_code||'N/A']);
+  rows.push(['Commitment', _exNum(h.Commitment_original)]);
+  rows.push(['LP Interest %', h.pct_LP_Interest!=null?h.pct_LP_Interest:null]);
+  rows.push([]);
+  rows.push(['--- Prior to Current Notice ---']);
+  rows.push(['Unfunded Commitment (Prior)', _exNum(h.Unfunded_prior)]);
+  rows.push(['Cumul. Contributions (Prior)', _exNum(h.CumContribPrior)]);
+  rows.push(['Cumul. Distributions (Prior)', _exNum(h.CumDistribPrior)]);
+  rows.push([]);
+  rows.push(['--- Current Notice ---']);
+  rows.push(['Current Contributions', _exNum(h.Current_Commit_Contribution)]);
+  rows.push(['Current Distributions', _exNum(h.Current_Commit_Distribution)]);
+  rows.push(['LP Net Amount', _exNum(h.LP_net_amount)]);
+  rows.push([]);
+  rows.push(['--- After Current Notice ---']);
+  rows.push(['Unfunded Commitment (After)', _exNum(h.Unfunded_after)]);
+  rows.push(['Cumul. Contributions (After)', _exNum(h.CumContribAfter)]);
+  rows.push(['Cumul. Distributions (After)', _exNum(h.CumDistribAfter)]);
+  rows.push([]);
+  rows.push([]);
+
+  // Line Items section
+  const ri=realItems(notice.lineItems||[]);
+  rows.push(['#', 'Item Name', 'LP Amount', 'Type', 'Commitment Affecting']);
+  ri.forEach((it,i)=>{
+    rows.push([i+1, it.item_name||'', _exNum(it.LP_signed_amount), it.Transaction_type==='call'?'Call':'Distribution', it.Commitment_affecting?'Yes':'No']);
+  });
+  rows.push([]);
+
+  // Summary
+  let caCallS=0,caDistS=0,ncCallS=0,ncDistS=0;
+  ri.forEach(it=>{
+    const a=pN(it.LP_signed_amount);if(a==null)return;
+    const isCall=it.Transaction_type==='call';
+    const isCa=it.Commitment_affecting;
+    if(isCa&&isCall)caCallS+=a;else if(isCa&&!isCall)caDistS+=a;
+    else if(!isCa&&isCall)ncCallS+=a;else ncDistS+=a;
+  });
+  rows.push(['Summary']);
+  rows.push(['', 'Commitment Affecting - Calls', rd(caCallS)]);
+  rows.push(['', 'Commitment Affecting - Distributions', rd(caDistS)]);
+  rows.push(['', 'Commitment Affecting - Subtotal', rd(caCallS+caDistS)]);
+  rows.push(['', 'Non-Commitment - Calls', rd(ncCallS)]);
+  rows.push(['', 'Non-Commitment - Distributions', rd(ncDistS)]);
+  rows.push(['', 'Non-Commitment - Subtotal', rd(ncCallS+ncDistS)]);
+  rows.push(['', 'Total Calls', rd(caCallS+ncCallS)]);
+  rows.push(['', 'Total Distributions', rd(caDistS+ncDistS)]);
+  rows.push(['', 'Net Amount', rd(caCallS+caDistS+ncCallS+ncDistS)]);
+
+  return rows;
+}
+
+/* Wire Info 시트 — 단건 */
+function _exWireSheetSingle(notice){
+  const h=notice.header;
+  const wire=(h.wire_info||[])[0]||null;
+  const netAmt=pN(h.LP_net_amount);
+  const rows=[];
+  rows.push(['Direction', netAmt>0?'Outbound (Capital Call)':netAmt<0?'Inbound (Distribution)':'Adjustment']);
+  rows.push(['Net Amount', _exNum(h.LP_net_amount)]);
+  rows.push([]);
+  if(wire){
+    rows.push(['--- Beneficiary Bank ---']);
+    rows.push(['Bank Name', wire.beneficiary_bank_name||'']);
+    rows.push(['Address', wire.beneficiary_bank_address||'']);
+    rows.push(['SWIFT / BIC', wire.beneficiary_bank_swift_code||wire.beneficiary_swift_code||'']);
+    rows.push(['ABA Routing', wire.beneficiary_bank_aba_routing||wire.beneficiary_aba_routing||'']);
+    rows.push(['Account #', wire.beneficiary_bank_account_number||'']);
+    rows.push([]);
+    rows.push(['--- Beneficiary ---']);
+    rows.push(['Name', wire.beneficiary_name||wire.beneficiary_account_name||'']);
+    rows.push(['Account #', wire.beneficiary_account_number||'']);
+    rows.push(['Reference', wire.reference||'']);
+    rows.push(['Further Credit', wire.further_credit||'']);
+    if(wire.intermediary_bank_name||wire.intermediary_swift_code){
+      rows.push([]);
+      rows.push(['--- Intermediary Bank ---']);
+      rows.push(['Bank Name', wire.intermediary_bank_name||'']);
+      rows.push(['SWIFT / BIC', wire.intermediary_swift_code||'']);
+      rows.push(['Account #', wire.intermediary_account_number||'']);
+    }
+  } else {
+    rows.push(['Wire 정보 없음']);
+  }
+  return rows;
+}
+
+/* Wire Info 시트 — 누적 (이력 테이블) */
+function _exWireSheetAll(notice){
+  const history=buildWireHistory(notice);
+  const rows=[];
+  rows.push(['Date', 'Direction', 'SWIFT (Bank)', 'Account # (Bank)', 'Bank Name', 'Match']);
+  history.forEach(wh=>{
+    rows.push([
+      wh.date,
+      wh.dir==='outbound'?'Out':'In',
+      wh.swift||'',
+      wh.acct||'',
+      wh.acctName||'',
+      wh.matchStatus==='match'?'✓':wh.matchStatus==='mismatch'?'⚠':wh.matchStatus==='first'?'-':'-'
+    ]);
+  });
+  return rows;
+}
+
+/* Exposure 시트 — AI 그룹화 반영 + Subtotal */
+function _exExposureSheet(notice){
+  const h=notice.header;
+  const fundKey=getFundKey(h);
+  const lpCode=h.LP_code||'';
+  const lpFull=h.LP_Name_full||'';
+
+  const allFundLp=_exFundLpNotices(notice);
+  const nLen=allFundLp.length;
+
+  // Collect raw items
+  const rawItems=[];
+  allFundLp.forEach((n,ni)=>{
+    if(n.is_voided) return;
+    realItems(n.lineItems||[]).forEach(it=>{
+      const raw=it.item_name||'';
+      if(!raw) return;
+      rawItems.push({raw, amt:pN(it.LP_signed_amount)||0, ni});
+    });
+  });
+
+  // Grouping logic (same as rExposure)
+  const aiGroups=S._assetGroups[fundKey]||null;
+  const overrides=S._assetGroupOverrides[fundKey]||{};
+  const aiReverse={};
+  if(aiGroups){
+    Object.entries(aiGroups).forEach(([canonical, members])=>{
+      (members||[]).forEach(m=>{ aiReverse[m]=canonical; });
+    });
+  }
+  function getCanonical(rawName){
+    if(overrides[rawName]) return overrides[rawName];
+    if(aiReverse[rawName]) return aiReverse[rawName];
+    return normalizeAssetName(rawName)||rawName;
+  }
+
+  // Build grouped data: canonical → { rawMap: { rawName → [amounts per notice] } }
+  const groups={};
+  rawItems.forEach(({raw, amt, ni})=>{
+    const key=getCanonical(raw);
+    if(!groups[key]) groups[key]={rawMap:{}};
+    if(!groups[key].rawMap[raw]) groups[key].rawMap[raw]=new Array(nLen).fill(0);
+    groups[key].rawMap[raw][ni]+=amt;
+  });
+
+  const canonicals=Object.keys(groups).sort((a,b)=>a.localeCompare(b,undefined,{sensitivity:'base'}));
+
+  // Build header row
+  const headerRow=['Canonical Group', 'Raw Item Name'];
+  allFundLp.forEach((n,ni)=>{
+    const d=fmtDate(n.header.issue_date||n.header.due_date||'');
+    const tp=n.header.notice_type||'';
+    headerRow.push(`#${ni+1} ${d} (${tp})`);
+  });
+  headerRow.push('Total');
+
+  const rows=[];
+  rows.push([`Asset Exposure Matrix — ${h.Underlying_Fund_Name_short||h.Underlying_Fund_Name_full||''} / ${h.LP_Name_short||h.LP_Name_full||''}`]);
+  rows.push([]);
+  rows.push(headerRow);
+
+  const grandTotal=new Array(nLen).fill(0);
+
+  canonicals.forEach(canonical=>{
+    const g=groups[canonical];
+    const rawNames=Object.keys(g.rawMap).sort();
+    const groupTotal=new Array(nLen).fill(0);
+
+    rawNames.forEach(raw=>{
+      const amts=g.rawMap[raw];
+      const row=[canonical, raw];
+      let rowTotal=0;
+      amts.forEach((a,ni)=>{
+        row.push(a!==0?rd(a):null);
+        groupTotal[ni]+=a;
+        grandTotal[ni]+=a;
+        rowTotal+=a;
+      });
+      row.push(rd(rowTotal));
+      rows.push(row);
+    });
+
+    // Subtotal 행 — raw name이 2개 이상인 그룹만
+    if(rawNames.length>1){
+      const subRow=[`  Subtotal: ${canonical}`, ''];
+      let subTotal=0;
+      groupTotal.forEach(v=>{subRow.push(rd(v));subTotal+=v;});
+      subRow.push(rd(subTotal));
+      rows.push(subRow);
+    }
+  });
+
+  // Grand Total
+  const gtRow=['Grand Total', ''];
+  let gt=0;
+  grandTotal.forEach(v=>{gtRow.push(rd(v));gt+=v;});
+  gtRow.push(rd(gt));
+  rows.push([]);
+  rows.push(gtRow);
+
+  return rows;
+}
+
+/* Commitment 시트 */
+function _exCommitmentSheet(notice){
+  const h=notice.header;
+  const fundKey=getFundKey(h);
+  const lpCode=h.LP_code||'';
+  const lpFull=h.LP_Name_full||'';
+  const currency=h.Currency&&h.Currency!=='N/A'?h.Currency:'USD';
+
+  const allNotices=_exFundLpNotices(notice);
+  const dataRows=allNotices.filter(x=>!x.is_voided).map((n,i)=>{
+    const hh=n.header;
+    const commit=pN(hh.Commitment_original);
+    const unfPrior=pN(hh.Unfunded_prior);
+    const unfAfter=pN(hh.Unfunded_after);
+    const funded=(commit!=null&&unfAfter!=null)?commit-unfAfter:null;
+    const pct=(commit&&unfAfter!=null)?(1-unfAfter/commit)*100:null;
+    let caAmount=0;
+    realItems(n.lineItems||[]).forEach(it=>{
+      if(it.Commitment_affecting){const a=pN(it.LP_signed_amount);if(a!=null)caAmount+=a;}
+    });
+    return{idx:i+1,commit,unfPrior,unfAfter,funded,pct:pct!=null?rd(pct):null,caAmount:rd(caAmount),
+      date:fmtDate(hh.issue_date||''),type:hh.notice_type,isCurrent:n.id===notice.id};
+  });
+
+  // Deltas
+  dataRows.forEach((r,i)=>{
+    r.deltaPct=(i>0&&r.pct!=null&&dataRows[i-1].pct!=null)?rd(r.pct-dataRows[i-1].pct):(i===0&&r.pct!=null?rd(r.pct):null);
+  });
+
+  const latestCommit=dataRows.reduce((v,r)=>r.commit||v,null);
+  const latest=dataRows.length?dataRows[dataRows.length-1]:null;
+  const latestPct=latest?latest.pct:null;
+
+  const rows=[];
+  rows.push([`Commitment History — ${h.Underlying_Fund_Name_full||h.Underlying_Fund_Name_short||''} / ${h.LP_Name_full||h.LP_Name_short||''}`]);
+  rows.push([`Commitment: ${latestCommit!=null?latestCommit:'N/A'}`, `Currency: ${currency}`, `Notices: ${dataRows.length}`]);
+  rows.push([]);
+  rows.push(['#', 'Date', 'Type', 'Unfunded Prior', 'CA Amount', 'Unfunded After', 'Funded', '소진율 (%)', 'Δ (%)']);
+
+  dataRows.forEach(r=>{
+    rows.push([
+      r.isCurrent?`▶ ${r.idx}`:r.idx,
+      r.date||'N/A',
+      r.type||'',
+      r.unfPrior,
+      r.caAmount,
+      r.unfAfter,
+      r.funded,
+      r.pct,
+      r.deltaPct
+    ]);
+  });
+
+  rows.push([]);
+  rows.push(['Latest 소진율', latestPct!=null?latestPct+'%':'N/A']);
+
+  return rows;
+}
+
+/* 파일명 안전 문자열 */
+function _exSafeFileName(s){
+  return (s||'export').replace(/[\/\\?*\[\]<>|":]/g,'_').substring(0,50);
+}
+
+/* 메인 Export 실행 */
+async function generateExport(){
+  if(typeof XLSX==='undefined'){alert('SheetJS 라이브러리 로드 실패. 페이지 새로고침 후 다시 시도하세요.');return;}
+  const d=S._exportPopup; if(!d) return;
+  const notice=S.notices.find(x=>x.id===S.activeNoticeId);
+  if(!notice){alert('선택된 Notice가 없습니다.');return;}
+
+  const h=notice.header;
+  const fundShort=_exSafeFileName(h.Underlying_Fund_Name_short||h.Underlying_Fund_Name_full||'Fund');
+  const lpCode=_exSafeFileName(h.LP_code||h.LP_Name_short||'LP');
+  const issueDate=fmtDate(h.issue_date)||'undated';
+
+  const isXlsx=d.format==='xlsx';
+  const isAll=d.scope==='all';
+
+  try{
+    const wb=XLSX.utils.book_new();
+
+    if(!isAll){
+      // 현재 Notice만 — 시트 4개
+      const noticeWs=XLSX.utils.aoa_to_sheet(_exNoticeSheet(notice));
+      _exApplyColWidths(noticeWs, [30,40,18,14,18]);
+      XLSX.utils.book_append_sheet(wb, noticeWs, 'Notice');
+
+      const wireWs=XLSX.utils.aoa_to_sheet(_exWireSheetSingle(notice));
+      _exApplyColWidths(wireWs, [22,50]);
+      XLSX.utils.book_append_sheet(wb, wireWs, 'Wire Info');
+
+      const expWs=XLSX.utils.aoa_to_sheet(_exExposureSheet(notice));
+      _exApplyColWidths(expWs, [30,30]);
+      XLSX.utils.book_append_sheet(wb, expWs, 'Exposure');
+
+      const cmtWs=XLSX.utils.aoa_to_sheet(_exCommitmentSheet(notice));
+      _exApplyColWidths(cmtWs, [8,14,14,18,18,18,18,12,10]);
+      XLSX.utils.book_append_sheet(wb, cmtWs, 'Commitment');
+
+    } else {
+      // 누적 Notice 모두 — Notice 시트 N개 + Wire/Exposure/Commitment 각 1개
+      const allNotices=_exFundLpNotices(notice).filter(x=>!x.is_voided);
+      allNotices.forEach((n,i)=>{
+        const dt=fmtDate(n.header.issue_date||'');
+        const sheetName=`Notice_${i+1}_${(dt||'undated').replace(/\//g,'-')}`.substring(0,31);
+        const ws=XLSX.utils.aoa_to_sheet(_exNoticeSheet(n));
+        _exApplyColWidths(ws, [30,40,18,14,18]);
+        XLSX.utils.book_append_sheet(wb, ws, sheetName);
+      });
+
+      const wireWs=XLSX.utils.aoa_to_sheet(_exWireSheetAll(notice));
+      _exApplyColWidths(wireWs, [14,10,18,22,30,8]);
+      XLSX.utils.book_append_sheet(wb, wireWs, 'Wire History');
+
+      const expWs=XLSX.utils.aoa_to_sheet(_exExposureSheet(notice));
+      _exApplyColWidths(expWs, [30,30]);
+      XLSX.utils.book_append_sheet(wb, expWs, 'Exposure');
+
+      const cmtWs=XLSX.utils.aoa_to_sheet(_exCommitmentSheet(notice));
+      _exApplyColWidths(cmtWs, [8,14,14,18,18,18,18,12,10]);
+      XLSX.utils.book_append_sheet(wb, cmtWs, 'Commitment');
+    }
+
+    const baseName=`${fundShort}_${lpCode}_${isAll?'ALL':issueDate}`;
+
+    if(isXlsx){
+      // .xlsx 직접 다운로드
+      XLSX.writeFile(wb, `${baseName}.xlsx`);
+    } else {
+      // .csv — 시트별 개별 CSV를 ZIP으로 묶기
+      if(typeof JSZip==='undefined'){alert('JSZip 라이브러리 로드 실패.');return;}
+      const zip=new JSZip();
+      wb.SheetNames.forEach(name=>{
+        const csv=XLSX.utils.sheet_to_csv(wb.Sheets[name]);
+        zip.file(`${name}.csv`, csv);
+      });
+      const blob=await zip.generateAsync({type:'blob'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=url;a.download=`${baseName}.zip`;
+      document.body.appendChild(a);a.click();
+      setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},100);
+    }
+
+    S._exportPopup=null;
+    R();
+  }catch(e){
+    console.error('Export failed:', e);
+    alert('Export 실패: '+e.message);
+  }
+}
+
+/* 열 너비 설정 헬퍼 */
+function _exApplyColWidths(ws, widths){
+  ws['!cols']=widths.map(w=>({wch:w}));
+}
+
 /* Merge this fund into another fund group — unifies Fund_ID_Key so they group together */
 function mergeFund(srcFundIdx){
   const tree=buildTree();
@@ -6295,10 +6737,7 @@ function rMultiLpPopup(){
         </div>
         <button style="margin-top:4px;padding:4px 10px;font-size:11px;border:1px dashed var(--bdr);border-radius:var(--r);background:none;color:var(--t2);cursor:pointer;width:100%" onclick="mlpAddRow()">+ LP Code 추가</button>
 
-        <div style="margin-top:12px;padding:8px 10px;background:var(--amber-d);border:1px solid rgba(217,119,6,.15);border-radius:var(--r);font-size:11px;color:var(--amber)">
-          ⚠ LP Code 1개당 AI 호출 1회 (비용 발생). ${validCount}건 선택됨.
-        </div>
-        <div style="margin-top:6px;padding:8px 10px;background:var(--indigo-d);border:1px solid rgba(79,70,229,.12);border-radius:var(--r);font-size:11px;color:var(--indigo)">
+        <div style="margin-top:12px;padding:8px 10px;background:var(--indigo-d);border:1px solid rgba(79,70,229,.12);border-radius:var(--r);font-size:11px;color:var(--indigo)">
           💡 같은 펀드의 추가 PDF 업로드 시 동일 LP Code가 자동 적용됩니다.
         </div>
       </div>
@@ -6353,20 +6792,26 @@ async function deferMultiLp(){
     if(!resp.ok) throw new Error(`서버 오류 ${resp.status}`);
     const data=await resp.json();
 
-    // Add placeholder notice to S.notices
+    // Add or update placeholder notice in S.notices (중복 방지)
     const header=data.header;
     normalizeNames(header);
-    S.notices.push({
-      id: data.notice_id,
-      fileName: job.fileName,
-      analyzedAt: new Date().toISOString(),
-      header,
-      lineItems: [],
-      rawAiResponse: '',
-      is_voided: false,
-      voided_by: null,
-      page_count: data.page_count,
-    });
+    const existIdx=S.notices.findIndex(x=>x.id===data.notice_id);
+    if(existIdx>=0){
+      // 이미 존재 — header만 갱신 (재 defer 시 push 중복 방지)
+      S.notices[existIdx].header=header;
+    } else {
+      S.notices.push({
+        id: data.notice_id,
+        fileName: job.fileName,
+        analyzedAt: new Date().toISOString(),
+        header,
+        lineItems: [],
+        rawAiResponse: '',
+        is_voided: false,
+        voided_by: null,
+        page_count: data.page_count,
+      });
+    }
     console.log(`[DEFER] Saved placeholder for "${ml.fundPreview}" (${ml.investorIds.length} IDs)`);
   }catch(e){
     console.error('Defer save failed:', e);
