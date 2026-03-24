@@ -2106,6 +2106,27 @@ async def get_pdf(notice_id: str, request: Request):
         headers={"Content-Disposition": f"inline; filename={notice_id}.pdf"})
 
 
+@app.get("/api/notices/{notice_id}/pdf-url")
+async def get_pdf_url(notice_id: str, request: Request):
+    """Return a Supabase Storage signed URL for direct PDF download.
+    Bypasses server as PDF relay — browser downloads directly from Supabase CDN."""
+    user = await get_current_user(request)
+    await check_notice_access(notice_id, user)
+    try:
+        result = get_supa().storage.from_("pdfs").create_signed_url(
+            f"{notice_id}.pdf", 300)  # 5 minutes
+        url = result.get("signedURL") or result.get("signedUrl") or ""
+        if not url:
+            raise HTTPException(500, "Failed to create signed URL")
+        return {"url": url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Fallback: if signed URL fails, indicate client should use /pdf endpoint
+        print(f"  [WARN] Signed URL failed for {notice_id}: {e}")
+        raise HTTPException(500, f"Signed URL failed: {str(e)[:100]}")
+
+
 # ── AI Q&A ──────────────────────────────────────────────
 
 class QaRequest(BaseModel):

@@ -503,6 +503,7 @@ const S = {
   _adminTotalUnique: 0,  // total unique notices across all orgs
   _orgAssign: null,      // org assignment popup data
   _noticeOrgMap: null,   // admin portfolio management data
+  _lpEdit: null,         // LP edit popup data
 };
 let _noticeCounter = 0;
 let _batchCounter = 0;
@@ -906,6 +907,7 @@ function renderPG(){
   if(S.showLpMove) globalPopups+=rLpMovePopup();
   if(S.showFundMerge) globalPopups+=rFundMergePopup();
   if(S._orgAssign) globalPopups+=rOrgAssignPopup();
+  if(S._lpEdit) globalPopups+=rLpEditPopup();
   if(globalPopups){
     let gp=document.getElementById('_globalPopups');
     if(!gp){gp=document.createElement('div');gp.id='_globalPopups';document.body.appendChild(gp);}
@@ -1567,7 +1569,7 @@ function pgUpload(){
         return`${batchSep}<div id="job_${j.id}" style="padding:8px 10px;background:var(--bg2);border:1px solid ${j.status==='error'?'var(--red)':'var(--bdr)'};border-radius:var(--r);margin-bottom:5px;font-size:11px">
           <div style="display:flex;align-items:center;gap:8px">
             <span class="job-ico">${ico}</span>
-            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--t1);font-weight:500">${j.fileName}</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--t1);font-weight:500">${j._isReparse?'<span style="color:var(--indigo);font-size:10px">↻ 재파싱</span> ':''}${j.fileName}</span>
             <div class="job-spin spin-s" style="${j.status==='processing'||j.status==='reading'?'':'display:none'}"></div>
             <span class="job-st" style="font-size:11px;color:${stColor};font-weight:600">${stText}</span>
             ${j.status==='done'&&j.noticeId?`<button class="btn btn-sm btn-s" style="padding:2px 6px;font-size:11px" onclick="viewNotice('${j.noticeId}')">보기</button>`:''}
@@ -1752,7 +1754,8 @@ function pgPortfolio(){
               ondragover="if(!_isFundDrag){event.preventDefault();this.style.background='rgba(45,127,249,.06)';this.style.outline='2px dashed var(--blue)';this.style.outlineOffset='-2px'}"
               ondragleave="this.style.background='';this.style.outline=''"
               ondrop="this.style.background='';this.style.outline='';handleNoticeDropOnLp(event,${fi},${li})">
-              <div style="font-size:12px;font-weight:600;color:var(--t1)">${escH(lp.displayName)} ${lpCode?'· '+lpCode:''}</div>
+              <div style="font-size:12px;font-weight:600;color:var(--t1)">${escH(lp.displayName)} ${lpCode?'· '+lpCode:''}
+                ${_userRole!=='viewer'?` <span onclick="event.stopPropagation();editLpInfo(${fi},${li})" style="cursor:pointer;font-size:10px;color:var(--t3);opacity:.5;padding:1px 6px;border-radius:3px;border:1px solid var(--bdr);background:var(--bg0)" onmouseover="this.style.opacity='1';this.style.color='var(--t1)'" onmouseout="this.style.opacity='.5';this.style.color='var(--t3)'" title="LP 정보 수정">LP 수정</span>`:''}</div>
               <div style="display:flex;align-items:center;gap:12px;margin-top:6px;font-size:11px;color:var(--t2)">
                 ${commit?`<span>Commit: <b style="color:var(--t1)">${fA(commit)}</b></span>`:''}
                 ${pctUsed!==null?`<div style="width:60px;height:6px;background:var(--bdr);border-radius:3px;overflow:hidden"><div style="height:100%;width:${pctUsed}%;background:var(--teal);border-radius:3px"></div></div><span>${pctUsed}%</span>`:''}
@@ -2284,17 +2287,17 @@ function renderResultPG(hEl,bEl){
   const h=n.header,items=n.lineItems||[];
   const tt=h.notice_type==='Call'?'tg-c':h.notice_type==='Distribution'?'tg-d':'tg-a';
   const voidedTag=n.is_voided?'<span class="tg" style="background:rgba(120,120,120,.1);color:#999;margin-left:6px">VOIDED</span>':'';
-  const voidsInfo=h.voids_prior_notice&&h.voids_prior_notice!=='N/A'?`<span style="color:var(--amber);margin-left:8px;font-size:11px">⚠️ Supersedes: ${escH(h.voids_prior_notice)}${h.voids_prior_date&&h.voids_prior_date!=='N/A'?' ('+h.voids_prior_date+')':''}</span>`:'';
+  const voidsInfo=h.voids_prior_notice&&h.voids_prior_notice!=='N/A'?`<span style="color:var(--amber);font-size:11px">⚠️ Supersedes: ${escH(h.voids_prior_notice)}${h.voids_prior_date&&h.voids_prior_date!=='N/A'?' ('+h.voids_prior_date+')':''}</span>`:'';
   const noticeNum=(h.notice_number&&h.notice_number!=='N/A')?h.notice_number:'';
   const fundFullDisplay=h.Underlying_Fund_Name_full&&h.Underlying_Fund_Name_full!=='N/A'?h.Underlying_Fund_Name_full:'';
   hEl.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;width:100%;gap:16px">
     <div style="flex-shrink:0"><div style="display:flex;align-items:center;gap:7px"><h1 style="${n.is_voided?'text-decoration:line-through;opacity:.5':''}">${h.notice_title||'Notice'}</h1><span class="tg ${tt}" style="border-radius:10px;padding:2px 10px">${h.notice_type||'N/A'}</span>${voidedTag}</div>
       ${fundFullDisplay?`<div style="font-size:12px;color:var(--t1);margin-top:2px;font-weight:500">${escH(fundFullDisplay)}</div>`:''}
+      ${voidsInfo?`<div style="margin-top:3px">${voidsInfo}</div>`:''}
     </div>
     <div style="flex:1;text-align:right;font-size:11px;color:var(--t2);line-height:1.7;min-width:0">
       <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">LP: ${escH(h.LP_Name_full||h.LP_Name_short||'N/A')}${h.LP_code&&h.LP_code!=='N/A'?' · '+escH(h.LP_code):''}</div>
       <div style="color:var(--t1)">Issue: ${fmtDate(h.issue_date)||'N/A'} · Due: ${fmtDate(h.due_date)||'N/A'}</div>
-      ${voidsInfo?`<div>${voidsInfo}</div>`:''}
     </div>
     <div style="display:flex;gap:6px;flex-shrink:0">
       ${_userRole==='admin'?`<button style="padding:4px 10px;font-size:11px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;transition:all .15s" onclick="showOrgAssign('${n.id}')" onmouseover="this.style.borderColor='var(--blue)';this.style.color='var(--blue)'" onmouseout="this.style.borderColor='';this.style.color='var(--t3)'" title="기관 배정 (이동/복사)">🏢 기관 배정</button>`:''}
@@ -2454,7 +2457,30 @@ function rILPA(h){
 /* ===== RIGHT PANEL: PDF VIEWER (Backend Image API) ===== */
 let _pdfPage=1, _pdfExpanded=false, _pdfNoticeId=null, _pdfPageCount=0;
 let _pdfZoom=100;
-let _pdfDoc=null; // cached PDF.js document
+let _pdfDoc=null; // current active PDF.js document
+
+// ── LRU PDF Cache (방안 D) ──
+const _pdfCache=new Map(); // noticeId → pdfDoc
+const PDF_CACHE_MAX=5;
+
+function _pdfCacheGet(noticeId){
+  if(!_pdfCache.has(noticeId)) return null;
+  const doc=_pdfCache.get(noticeId);
+  // Move to end (most recently used)
+  _pdfCache.delete(noticeId);
+  _pdfCache.set(noticeId, doc);
+  return doc;
+}
+
+function _pdfCacheSet(noticeId, doc){
+  if(_pdfCache.has(noticeId)) _pdfCache.delete(noticeId);
+  _pdfCache.set(noticeId, doc);
+  // Evict oldest if over limit
+  while(_pdfCache.size>PDF_CACHE_MAX){
+    const oldest=_pdfCache.keys().next().value;
+    _pdfCache.delete(oldest);
+  }
+}
 
 function rPdfViewer(n){
   const pc=n.page_count||0;
@@ -2494,6 +2520,64 @@ function rPdfViewer(n){
   </div>`;
 }
 
+// ── PDF fetch with Signed URL (방안 B) + Retry (방안 A) ──
+function _fetchWithTimeout(fetchFn, timeoutMs){
+  const ctrl=new AbortController();
+  const timer=setTimeout(()=>ctrl.abort(), timeoutMs);
+  return fetchFn(ctrl.signal).finally(()=>clearTimeout(timer));
+}
+
+async function _fetchPdfBytes(noticeId){
+  const MAX_RETRIES=4;
+  const RETRY_DELAYS=[2000,4000,6000]; // escalating: cold start needs time
+  const URL_TIMEOUT=15000;  // 15s for signed URL API call
+  const PDF_TIMEOUT=30000;  // 30s for PDF download
+  const loadingSpan=document.querySelector('#pdfLoading span');
+
+  for(let attempt=0; attempt<MAX_RETRIES; attempt++){
+    const isLast=(attempt===MAX_RETRIES-1);
+    try{
+      // Always try Signed URL first (bypasses server as PDF relay)
+      try{
+        if(loadingSpan) loadingSpan.textContent=attempt>0
+          ?`PDF 로딩 중... (재시도 ${attempt}/${MAX_RETRIES-1})`
+          :'PDF 로딩 중...';
+        const urlResp=await _fetchWithTimeout(
+          sig=>authFetch(`${API}/api/notices/${noticeId}/pdf-url`,{signal:sig}),
+          URL_TIMEOUT);
+        if(urlResp.ok){
+          const {url}=await urlResp.json();
+          if(url){
+            if(loadingSpan) loadingSpan.textContent='PDF 다운로드 중...';
+            const pdfResp=await _fetchWithTimeout(
+              sig=>fetch(url,{signal:sig}), PDF_TIMEOUT);
+            if(pdfResp.ok) return await pdfResp.arrayBuffer();
+          }
+        }
+      }catch(e){
+        console.warn(`Signed URL attempt ${attempt+1} failed:`, e.message);
+      }
+      // Fallback: fetch PDF bytes through server (last resort)
+      if(loadingSpan) loadingSpan.textContent='PDF 직접 로딩 중...';
+      const resp=await _fetchWithTimeout(
+        sig=>authFetch(`${API}/api/notices/${noticeId}/pdf`,{signal:sig}),
+        PDF_TIMEOUT);
+      if(resp.ok) return await resp.arrayBuffer();
+      if(resp.status===404) throw new Error('PDF not found (404)');
+    }catch(e){
+      if(e.message.includes('404')) throw e;
+      console.warn(`PDF fetch attempt ${attempt+1}/${MAX_RETRIES} failed:`, e.message);
+    }
+    // Retry delay with UI feedback
+    if(!isLast){
+      const delay=RETRY_DELAYS[attempt]||4000;
+      if(loadingSpan) loadingSpan.textContent=`서버 응답 대기 중... (${Math.round(delay/1000)}초 후 재시도)`;
+      await new Promise(r=>setTimeout(r, delay));
+    }
+  }
+  throw new Error(`PDF 로드 실패 (${MAX_RETRIES}회 시도)`);
+}
+
 async function pdfRenderPage(pageNum){
   if(!_pdfNoticeId) return;
   const canvas = document.getElementById('pdfCanvas');
@@ -2501,19 +2585,29 @@ async function pdfRenderPage(pageNum){
 
   // Show loading overlay, hide canvas content
   if(canvas) canvas.style.opacity='0';
-  if(loading) loading.style.display='flex';
+  if(loading){
+    loading.innerHTML='<div class="spin-s" style="width:24px;height:24px;border-width:2.5px"></div><span style="color:var(--t3);font-size:12px">PDF 렌더링 중...</span>';
+    loading.style.display='flex';
+  }
 
   try{
     await window._pdfjsReady;
-    // Load PDF document (cache it) — use authFetch for JWT token
-    if(!_pdfDoc || _pdfDoc._noticeId !== _pdfNoticeId){
-      const resp = await authFetch(`${API}/api/notices/${_pdfNoticeId}/pdf`);
-      if(!resp.ok) throw new Error(`PDF fetch failed: ${resp.status}`);
-      const buf = await resp.arrayBuffer();
+
+    // Check LRU cache first (방안 D)
+    const cached=_pdfCacheGet(_pdfNoticeId);
+    if(cached){
+      _pdfDoc=cached;
+      _pdfPageCount=_pdfDoc.numPages;
+    } else {
+      // Fetch PDF bytes with retry + signed URL
+      const buf=await _fetchPdfBytes(_pdfNoticeId);
       _pdfDoc = await pdfjsLib.getDocument({data: buf}).promise;
       _pdfDoc._noticeId = _pdfNoticeId;
       _pdfPageCount = _pdfDoc.numPages;
+      // Store in cache
+      _pdfCacheSet(_pdfNoticeId, _pdfDoc);
     }
+
     const page = await _pdfDoc.getPage(pageNum);
     if(!canvas) return;
 
@@ -2538,7 +2632,10 @@ async function pdfRenderPage(pageNum){
   }catch(e){
     console.error('PDF.js render error:', e);
     if(loading){
-      loading.innerHTML='<span style="color:var(--red);font-size:12px">PDF 로드 실패</span>';
+      const isTimeout=e.name==='AbortError'||e.message.includes('abort');
+      const msg=isTimeout?'서버 응답 시간 초과':'PDF 로드 실패';
+      loading.innerHTML=`<span style="color:var(--red);font-size:12px">${msg}</span>
+        <button class="btn btn-sm btn-s" onclick="_pdfDoc=null;_pdfCache.delete('${_pdfNoticeId}');pdfRenderPage(${_pdfPage})" style="margin-top:8px;font-size:11px">↻ 다시 시도</button>`;
     }
   }
 }
@@ -2822,7 +2919,7 @@ function rDashboard(h,items){
               ${S.editMode
                 ?`<span>Issue: <input type="date" value="${fmtDate(h.issue_date)||''}" onchange="editHeaderDate('issue_date',this.value)" style="font-size:11px;border:1px solid var(--bdr);border-radius:3px;padding:1px 4px;background:var(--bg0);color:var(--t1)"/></span>
                   <span>Due: <input type="date" value="${fmtDate(h.due_date)||''}" onchange="editHeaderDate('due_date',this.value)" style="font-size:11px;border:1px solid var(--bdr);border-radius:3px;padding:1px 4px;background:var(--bg0);color:var(--t1)"/></span>`
-                :`${dueDot} Issue: ${fmtDate(h.issue_date)||'N/A'} · Due: ${fmtDate(h.due_date)||'N/A'} ${dueText}`}
+                :`${dueDot} Issue: ${fmtDate(h.issue_date)||'N/A'}<br/>Due: ${fmtDate(h.due_date)||'N/A'} ${dueText}`}
             </div>
           </div>
           ${donutSvg}
@@ -4771,6 +4868,88 @@ function editFundName(fundIdx, fullName, currentShort){
   R();
 }
 
+function editLpInfo(fundIdx, lpIdx){
+  if(_userRole==='viewer') return;
+  const tree=buildTree();
+  const fund=tree[fundIdx];
+  if(!fund) return;
+  const lp=fund.lps[lpIdx];
+  if(!lp) return;
+
+  // Gather all notices for this LP
+  const lpNotices=[];
+  lp.classes.forEach(c=>c.notices.forEach(n=>lpNotices.push(n)));
+  if(!lpNotices.length) return;
+
+  const curFull=lpNotices[0].header.LP_Name_full||'';
+  const curShort=lpNotices[0].header.LP_Name_short||lp.displayName||'';
+  const curCode=lpNotices[0].header.LP_code||'';
+  const fundKey=lpNotices[0].header.Fund_ID_Key||'';
+
+  // Show popup
+  S._lpEdit={fundIdx, lpIdx, curFull, curShort, curCode, fundKey, noticeIds:lpNotices.map(n=>n.id)};
+  R();
+}
+
+function rLpEditPopup(){
+  const d=S._lpEdit; if(!d) return'';
+  return`<div class="mo-bg" onclick="if(event.target===this){S._lpEdit=null;R();}">
+    <div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:var(--rl);padding:0;width:95%;max-width:420px">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--bdr)">
+        <div style="font-size:14px;font-weight:700">LP 정보 수정</div>
+        <div style="font-size:11px;color:var(--t3);margin-top:2px">${d.noticeIds.length}건의 Notice에 일괄 적용</div>
+      </div>
+      <div style="padding:16px 20px">
+        <div style="margin-bottom:12px">
+          <label style="font-size:11px;font-weight:600;color:var(--t2);display:block;margin-bottom:3px">LP Code <span style="font-size:10px;color:var(--t3)">(읽기 전용)</span></label>
+          <input type="text" value="${escH(d.curCode)}" disabled style="width:100%;padding:8px 10px;border:1px solid var(--bdr);border-radius:6px;font-size:13px;box-sizing:border-box;background:var(--bg4);color:var(--t3)"/>
+        </div>
+        <div style="margin-bottom:12px">
+          <label style="font-size:11px;font-weight:600;color:var(--t2);display:block;margin-bottom:3px">LP Full Name</label>
+          <input id="lpEditFull" type="text" value="${escH(d.curFull)}" style="width:100%;padding:8px 10px;border:1px solid var(--bdr);border-radius:6px;font-size:13px;box-sizing:border-box;background:var(--bg0)"/>
+        </div>
+        <div style="margin-bottom:16px">
+          <label style="font-size:11px;font-weight:600;color:var(--t2);display:block;margin-bottom:3px">LP Short Name <span style="font-size:10px;color:var(--t3)">(표시용)</span></label>
+          <input id="lpEditShort" type="text" value="${escH(d.curShort)}" style="width:100%;padding:8px 10px;border:1px solid var(--bdr);border-radius:6px;font-size:13px;box-sizing:border-box;background:var(--bg0)"/>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn btn-sm btn-s" onclick="S._lpEdit=null;R()">취소</button>
+          <button class="btn btn-sm btn-p" onclick="submitLpEdit()">적용</button>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function submitLpEdit(){
+  const d=S._lpEdit; if(!d) return;
+  const newFull=(document.getElementById('lpEditFull')?.value||'').trim();
+  const newShort=(document.getElementById('lpEditShort')?.value||'').trim();
+  if(!newFull){alert('LP Full Name을 입력해주세요');return;}
+  if(!newShort){alert('LP Short Name을 입력해주세요');return;}
+
+  // Update name registry
+  if(d.curFull && S.nameReg.lp[d.curFull]){
+    delete S.nameReg.lp[d.curFull];
+  }
+  S.nameReg.lp[newFull]=newShort;
+
+  // Update all notices in this LP group
+  d.noticeIds.forEach(nid=>{
+    const n=S.notices.find(x=>x.id===nid);
+    if(n){
+      n.header.LP_Name_full=newFull;
+      n.header.LP_Name_short=newShort;
+      // Save to backend
+      authFetch(`${API}/api/notices/${nid}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({LP_Name_full:newFull, LP_Name_short:newShort})}).catch(()=>{});
+    }
+  });
+
+  S._lpEdit=null;
+  R();
+}
+
 /* Merge this fund into another fund group — unifies Fund_ID_Key so they group together */
 function mergeFund(srcFundIdx){
   const tree=buildTree();
@@ -5215,8 +5394,20 @@ async function reparseNotice(id){
   const oldNotice=S.notices.find(n=>n.id===id);
   const oldFileName=oldNotice?oldNotice.fileName:'';
 
-  // Show loading state
-  if(oldNotice) oldNotice._reparsing=true;
+  // Create a reparse job in the upload queue for progress tracking
+  const reparseJob={
+    id:'rp_'+id+'_'+Date.now(),
+    fileName: oldFileName||id,
+    file:null, _file:null,
+    status:'processing',
+    error:'', errorDetail:'',
+    noticeId:id,
+    batch:++_batchCounter,
+    t0:Date.now(), tReadDone:Date.now(), tParsingStart:null, tApiDone:null, tParseDone:null, tDone:null, tokens:null,
+    _isReparse:true,
+  };
+  S.jobs.push(reparseJob);
+  S.page='upload';
   R();
 
   try{
@@ -5242,7 +5433,19 @@ async function reparseNotice(id){
         let evt;
         try{evt=JSON.parse(line.slice(6).trim());}catch(e){continue;}
 
-        if(evt.stage==='done'){
+        if(evt.stage==='received'){
+          reparseJob.status='processing';
+          if(!updateJobCard(reparseJob.id)) R();
+        }
+        else if(evt.stage==='parsing'){
+          reparseJob.tParsingStart=Date.now();
+          reparseJob.status='processing';
+          if(!updateJobCard(reparseJob.id)) R();
+        }
+        else if(evt.stage==='heartbeat'){
+          // Server alive, AI still processing
+        }
+        else if(evt.stage==='done'){
           // Update notice in-place (same ID)
           const header=evt.header;
           const lineItems=evt.line_items;
@@ -5255,17 +5458,21 @@ async function reparseNotice(id){
             n.lineItems=lineItems;
             n.analyzedAt=new Date().toISOString();
             n.page_count=evt.page_count;
-            delete n._reparsing;
           }
+          reparseJob.tApiDone=Date.now();
+          reparseJob.tDone=Date.now();
+          reparseJob.tokens=evt.tokens;
+          reparseJob.status='done';
+          reparseJob.noticeId=id;
+          // Navigate to result
           S.activeNoticeId=id;
           S.page='result'; S.activeTab='validation';
           R();
           return;
         }
         else if(evt.stage==='multi_lp_detect'){
-          // Re-parsed as multi-LP — show LP selection popup
-          const n=S.notices.find(x=>x.id===id);
-          if(n) delete n._reparsing;
+          reparseJob.tDone=Date.now();
+          reparseJob.status='done';
           const ml={noticeId:evt.notice_id, investorIds:evt.investor_ids||[], fundPreview:evt.fund_preview||'', pageCount:evt.page_count||0};
           const syntheticJob={id:'reparse_'+id, fileName:oldFileName, status:'multi_lp', _multiLp:ml};
           S.showMultiLp={job:syntheticJob};
@@ -5280,9 +5487,9 @@ async function reparseNotice(id){
     }
   }catch(e){
     console.error('Reparse failed:',e);
-    alert('재파싱 실패: '+e.message);
-    const n=S.notices.find(x=>x.id===id);
-    if(n) delete n._reparsing;
+    reparseJob.status='error';
+    reparseJob.tDone=Date.now();
+    reparseJob.error='재파싱 실패: '+e.message;
     R();
   }
 }
