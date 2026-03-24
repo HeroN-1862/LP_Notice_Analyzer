@@ -343,6 +343,20 @@ details>summary{list-style:none}details>summary::-webkit-details-marker{display:
   .main{margin-left:48px}.pg-h,.pg-b{padding-left:12px;padding-right:12px}
   .dg{grid-template-columns:1fr 1fr}.sum-row{grid-template-columns:1fr 1fr}
 }
+/* Commitment Tab */
+.cmit-chev{min-width:72px;padding:8px 10px;border-radius:var(--r);cursor:pointer;text-align:center;font-size:11px;transition:all .15s;flex-shrink:0}
+.cmit-chev:hover{transform:translateY(-1px);box-shadow:0 2px 6px rgba(0,0,0,.08)}
+.cmit-call{background:rgba(29,53,87,.06);border:1px solid rgba(29,53,87,.15)}
+.cmit-dist{background:rgba(78,154,109,.06);border:1px solid rgba(78,154,109,.15)}
+.cmit-adj{background:rgba(217,119,6,.06);border:1px solid rgba(217,119,6,.15)}
+.cmit-cur{border-bottom:2.5px solid var(--blue);background:rgba(45,127,249,.06)!important}
+.cmit-void{opacity:.4;text-decoration:line-through}
+.cmit-arrow{font-size:14px;font-weight:700;line-height:1}
+.cmit-call .cmit-arrow{color:var(--indigo)}.cmit-dist .cmit-arrow{color:var(--emerald)}.cmit-adj .cmit-arrow{color:var(--amber)}
+.cmit-amt{font-family:var(--f);font-weight:600;color:var(--t1);margin:2px 0;font-size:11px}
+.cmit-delta{font-weight:600;font-size:10px}
+.cmit-date{color:var(--t3);font-size:10px;margin-top:2px}
+.cmit-conn{color:var(--bdr2);font-size:10px;padding:0 2px;flex-shrink:0;display:flex;align-items:center}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -680,7 +694,7 @@ function renderSB(){
     ? `<span class="badge proc">${S.jobs.filter(j=>j.status==='done').length+activeJobs.length>1? (S.jobs.filter(j=>j.status==='done').length)+'/'+S.jobs.length : '분석중'}</span>`
     : errorJobs.length ? `<span class="badge err">${errorJobs.length} err</span>` : '';
   document.getElementById('sb').innerHTML=`
-    <div class="sb-head"><div class="sb-logo" onclick="location.reload()" style="cursor:pointer" title="새로고침"><i>N</i><span>Notice Analyzer</span></div></div>
+    <div class="sb-head"><div class="sb-logo" onclick="if(_session){S.page=S.notices.length?'portfolio':'upload';S.activeNoticeId=null;R();}else{location.reload();}" style="cursor:pointer" title="홈"><i>N</i><span>Notice Analyzer</span></div></div>
     <div style="padding:4px 6px 0">
       <div class="sb-gl">메뉴</div>
       <div class="sb-it ${S.page==='upload'?'act':''} ${!S.connected||_userRole==='viewer'?'dis':''}" onclick="${_userRole==='viewer'?'alert(&quot;열람 전용 계정입니다&quot;)':'go(&quot;upload&quot;)'}" ${_userRole==='viewer'?'title="열람 전용 계정"':''}><span class="ic">+</span><span>PDF 업로드</span>${uploadBadge}</div>
@@ -2329,8 +2343,9 @@ function renderResultPG(hEl,bEl){
           <div class="result-tab ${S.resultTab==='notice'||!S.resultTab?'act':''}" onclick="S.resultTab='notice';R()">Notice</div>
           <div class="result-tab ${S.resultTab==='wire'?'act':''}" onclick="S.resultTab='wire';R()">Wire Info</div>
           <div class="result-tab ${S.resultTab==='exposure'?'act':''}" onclick="S.resultTab='exposure';S.rightPanel='hide';R()">Exposure</div>
+          <div class="result-tab ${S.resultTab==='commitment'?'act':''}" onclick="S.resultTab='commitment';S.rightPanel='hide';R()">Commitment</div>
         </div>
-        ${S.resultTab==='wire'?rWireInfo(n):S.resultTab==='exposure'?rExposure(n):`
+        ${S.resultTab==='wire'?rWireInfo(n):S.resultTab==='exposure'?rExposure(n):S.resultTab==='commitment'?rCommitment(n):`
         ${rDashboard(h,items)}
         ${rItems(items)}
         <div style="margin-top:12px">
@@ -2482,6 +2497,47 @@ function _pdfCacheSet(noticeId, doc){
   }
 }
 
+// ── IndexedDB PDF Cache (방안 G) — 영구 디스크 캐시 ──
+const IDB_NAME='lp_pdf_cache', IDB_STORE='pdfs', IDB_VER=1, IDB_MAX=50;
+function _idbOpen(){
+  return new Promise((res,rej)=>{
+    const r=indexedDB.open(IDB_NAME,IDB_VER);
+    r.onupgradeneeded=()=>{const db=r.result;if(!db.objectStoreNames.contains(IDB_STORE))db.createObjectStore(IDB_STORE,{keyPath:'id'});};
+    r.onsuccess=()=>res(r.result);
+    r.onerror=()=>rej(r.error);
+  });
+}
+async function _idbGet(noticeId){
+  try{
+    const db=await _idbOpen();
+    return new Promise(res=>{
+      const tx=db.transaction(IDB_STORE,'readonly');
+      const req=tx.objectStore(IDB_STORE).get(noticeId);
+      req.onsuccess=()=>res(req.result?.data||null);
+      req.onerror=()=>res(null);
+    });
+  }catch(e){return null;}
+}
+async function _idbSet(noticeId,arrayBuf){
+  try{
+    const db=await _idbOpen();
+    const tx=db.transaction(IDB_STORE,'readwrite');
+    const store=tx.objectStore(IDB_STORE);
+    store.put({id:noticeId,data:arrayBuf,ts:Date.now()});
+    const allReq=store.getAll();
+    allReq.onsuccess=()=>{
+      const all=allReq.result;
+      if(all.length>IDB_MAX){
+        all.sort((a,b)=>a.ts-b.ts);
+        all.slice(0,all.length-IDB_MAX).forEach(item=>store.delete(item.id));
+      }
+    };
+  }catch(e){}
+}
+async function _idbDelete(noticeId){
+  try{const db=await _idbOpen();const tx=db.transaction(IDB_STORE,'readwrite');tx.objectStore(IDB_STORE).delete(noticeId);}catch(e){}
+}
+
 function rPdfViewer(n){
   const pc=n.page_count||0;
   if(!pc) return`<div style="border:1px solid var(--bdr);border-radius:var(--rl);padding:40px 20px;text-align:center;color:var(--t3)">
@@ -2593,18 +2649,23 @@ async function pdfRenderPage(pageNum){
   try{
     await window._pdfjsReady;
 
-    // Check LRU cache first (방안 D)
+    // Check LRU cache first (1차: 메모리)
     const cached=_pdfCacheGet(_pdfNoticeId);
     if(cached){
       _pdfDoc=cached;
       _pdfPageCount=_pdfDoc.numPages;
     } else {
-      // Fetch PDF bytes with retry + signed URL
-      const buf=await _fetchPdfBytes(_pdfNoticeId);
+      // 2차: IndexedDB (디스크 영구 캐시)
+      let buf=await _idbGet(_pdfNoticeId);
+      if(!buf){
+        // 3차: 네트워크 (Signed URL + fallback)
+        buf=await _fetchPdfBytes(_pdfNoticeId);
+        _idbSet(_pdfNoticeId, buf); // fire-and-forget 저장
+      }
       _pdfDoc = await pdfjsLib.getDocument({data: buf}).promise;
       _pdfDoc._noticeId = _pdfNoticeId;
       _pdfPageCount = _pdfDoc.numPages;
-      // Store in cache
+      // Store in memory cache
       _pdfCacheSet(_pdfNoticeId, _pdfDoc);
     }
 
@@ -3564,6 +3625,265 @@ function aeDropNewGroup(e, fundKey){
   S._assetGroupOverrides[fundKey][raw]=newName;
   _aeSaveOverrides(fundKey);
   R();
+}
+
+/* ===== COMMITMENT TAB: Timeline of commitment utilization across Fund+LP notices ===== */
+function rCommitment(n){
+  const h=n.header;
+  const fundKey=getFundKey(h);
+  const lpCode=h.LP_code||'';
+  const lpFull=h.LP_Name_full||'';
+
+  // Same Fund+LP notices sorted by date
+  const allNotices=S.notices.filter(x=>{
+    if(getFundKey(x.header)!==fundKey) return false;
+    if(lpCode) return (x.header.LP_code||'')===lpCode;
+    return (x.header.LP_Name_full||'')===lpFull;
+  }).sort((a,b)=>(fmtDate(a.header.issue_date||'')).localeCompare(fmtDate(b.header.issue_date||'')));
+
+  const rows=allNotices.filter(x=>!x.is_voided).map((notice,i)=>{
+    const hh=notice.header;
+    const commit=pN(hh.Commitment_original);
+    const unfPrior=pN(hh.Unfunded_prior);
+    const unfAfter=pN(hh.Unfunded_after);
+    const funded=(commit!=null&&unfAfter!=null)?commit-unfAfter:null;
+    const pct=(commit&&unfAfter!=null)?(1-unfAfter/commit)*100:null;
+    let caAmount=0;
+    realItems(notice.lineItems||[]).forEach(it=>{
+      if(it.Commitment_affecting){const a=pN(it.LP_signed_amount);if(a!=null)caAmount+=a;}
+    });
+    return{notice,idx:i+1,commit,unfPrior,unfAfter,funded,pct,caAmount:rd(caAmount),
+      date:fmtDate(hh.issue_date||''),type:hh.notice_type,isCurrent:notice.id===n.id};
+  });
+
+  // Compute deltas
+  rows.forEach((r,i)=>{
+    r.deltaPct=(i>0&&r.pct!=null&&rows[i-1].pct!=null)?rd(r.pct-rows[i-1].pct):(i===0&&r.pct!=null?rd(r.pct):null);
+  });
+
+  if(!rows.length) return`<div style="text-align:center;padding:40px;color:var(--t3)">유효한 Notice가 없습니다.</div>`;
+
+  const latestCommit=rows.reduce((v,r)=>r.commit||v,null);
+  const latest=rows[rows.length-1];
+  const latestUnf=latest.unfAfter;
+  const latestFunded=(latestCommit!=null&&latestUnf!=null)?latestCommit-latestUnf:null;
+  const latestPct=(latestCommit&&latestUnf!=null)?(1-latestUnf/latestCommit)*100:null;
+
+  // Period info
+  const dates=rows.map(r=>r.date).filter(d=>d&&d!=='N/A');
+  const firstDate=dates.length?dates[0]:'';
+  const lastDate=dates.length?dates[dates.length-1]:'';
+  let periodStr='';
+  if(firstDate&&lastDate){
+    const d1=new Date(firstDate),d2=new Date(lastDate);
+    const months=Math.round((d2-d1)/(1000*60*60*24*30));
+    periodStr=`${firstDate.substring(0,7)} → ${lastDate.substring(0,7)}${months>=12?' (약 '+Math.round(months/12)+'년)':months>0?' (약 '+months+'개월)':''}`;
+  }
+  const currency=h.Currency&&h.Currency!=='N/A'?h.Currency:'USD';
+
+  // ── SECTION A: Summary Cards ──
+  const secA=`<div class="sec" style="margin-bottom:16px">
+    <div style="font-size:12px;color:var(--t2);margin-bottom:10px;line-height:1.7">
+      <div style="font-weight:600;color:var(--t1)">${escH(h.Underlying_Fund_Name_full||h.Underlying_Fund_Name_short||'')}</div>
+      <div>LP: ${escH(h.LP_Name_full||h.LP_Name_short||'N/A')}${h.LP_code&&h.LP_code!=='N/A'?' · '+escH(h.LP_code):''} · ${escH(currency)}</div>
+      ${periodStr?`<div style="color:var(--t3)">${periodStr}, ${rows.length}건</div>`:''}
+    </div>
+    <div class="sec-grid" style="grid-template-columns:repeat(4,1fr)">
+      <div class="sec-card"><div class="sc-label">Commitment</div><div class="sc-val">${fA(latestCommit)}</div></div>
+      <div class="sec-card"><div class="sc-label">Funded</div><div class="sc-val">${fA(latestFunded)}</div></div>
+      <div class="sec-card"><div class="sc-label">Unfunded</div><div class="sc-val">${fA(latestUnf)}</div></div>
+      <div class="sec-card"><div class="sc-label">소진율</div><div class="sc-val">${latestPct!=null?latestPct.toFixed(1)+'%':'N/A'}</div></div>
+    </div>
+  </div>`;
+
+  // ── SECTION B: Progress Bar + Tick Marks + Chevron Timeline ──
+  const barPct=latestPct!=null?Math.min(Math.max(latestPct,0),100):0;
+
+  // Tick marks
+  let ticksHtml='';
+  rows.forEach((r,i)=>{
+    if(r.pct==null) return;
+    const left=Math.min(Math.max(r.pct,0),100);
+    const col=r.isCurrent?'var(--blue)':r.type==='Call'?'var(--indigo)':r.type==='Distribution'?'var(--emerald)':'var(--amber)';
+    const sz=r.isCurrent?'8px':'6px';
+    const tipType=r.type==='Call'?'Call':r.type==='Distribution'?'Dist':'Adj';
+    const tipAmt=r.caAmount!=null?fA(Math.abs(r.caAmount)):'';
+    ticksHtml+=`<div style="position:absolute;left:${left}%;transform:translateX(-50%);text-align:center;cursor:default" title="${tipType} #${r.idx}: ${r.caAmount>=0?'+':''}${tipAmt} (${r.date})">
+      <div style="width:0;height:0;border-left:${sz} solid transparent;border-right:${sz} solid transparent;border-top:${sz} solid ${col};margin:0 auto"></div>
+    </div>`;
+  });
+
+  // Chevron timeline
+  const maxDelta=Math.max(...rows.map(r=>Math.abs(r.caAmount||0)),1);
+  let chevHtml='';
+  rows.forEach((r,i)=>{
+    const w=Math.round(72+(Math.abs(r.caAmount||0)/maxDelta)*88);
+    const cls=r.type==='Call'?'cmit-call':r.type==='Distribution'?'cmit-dist':'cmit-adj';
+    const arrow=r.type==='Distribution'?'◄':'►';
+    const dCol=r.deltaPct!=null?(r.deltaPct>=0?'color:var(--indigo)':'color:var(--emerald)'):'color:var(--t3)';
+    const dSign=r.deltaPct!=null&&r.deltaPct>=0?'+':'';
+    const dText=r.deltaPct!=null?`${dSign}${r.deltaPct.toFixed(1)}%`:'—';
+    const typeBadge=r.type==='Call'?'tg-c':r.type==='Distribution'?'tg-d':'tg-a';
+    if(i>0) chevHtml+=`<div class="cmit-conn">──▶</div>`;
+    chevHtml+=`<div class="cmit-chev ${cls} ${r.isCurrent?'cmit-cur':''}" style="width:${w}px" onclick="viewNotice('${r.notice.id}')" id="cmit-chev-${i}">
+      <div class="cmit-arrow">${arrow}</div>
+      <div class="cmit-amt">${fA(Math.abs(r.caAmount||0))}</div>
+      <div class="cmit-delta" style="${dCol}">${dText}</div>
+      <div style="margin:2px 0"><span class="tg ${typeBadge}" style="font-size:9px;padding:1px 5px;border-radius:6px">${r.type==='Call'?'Call':r.type==='Distribution'?'Dist':'Adj'}</span></div>
+      <div class="cmit-date">${r.date?r.date.substring(2):''}</div>
+    </div>`;
+  });
+
+  // Find current index for scrollIntoView
+  const curIdx=rows.findIndex(r=>r.isCurrent);
+
+  const secB=`<div class="sec" style="margin-bottom:16px">
+    <div class="sh"><div class="st">소진 흐름</div></div>
+    <div style="position:relative;margin-bottom:16px">
+      <div style="position:relative;height:14px;margin-bottom:2px">${ticksHtml}</div>
+      <div style="height:28px;background:var(--bg4);border-radius:6px;overflow:hidden;position:relative">
+        <div style="width:${barPct}%;height:100%;background:var(--indigo);border-radius:${barPct>=100?'6px':'6px 0 0 6px'};transition:width .3s"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px">
+        <span style="color:var(--indigo);font-weight:600">Funded: ${fA(latestFunded)} (${barPct.toFixed(1)}%)</span>
+        <span style="color:var(--t3)">Unfunded: ${fA(latestUnf)} (${latestPct!=null?(100-latestPct).toFixed(1)+'%':'')}</span>
+      </div>
+    </div>
+    <div id="cmitTimeline" style="overflow-x:auto;padding:8px 0">
+      <div style="display:flex;align-items:center;min-width:fit-content;gap:0">
+        ${chevHtml}
+      </div>
+    </div>
+  </div>`;
+
+  // scrollIntoView for current notice chevron
+  if(curIdx>=0) setTimeout(()=>{const el=document.getElementById('cmit-chev-'+curIdx);if(el)el.scrollIntoView({inline:'center',behavior:'smooth',block:'nearest'});},100);
+
+  // ── SECTION C: Detail Table ──
+  let tRows='';
+  rows.forEach((r,i)=>{
+    const isCur=r.isCurrent;
+    const trStyle=isCur?'background:rgba(29,53,87,.04);border-left:3px solid var(--indigo)':'border-left:3px solid transparent';
+    const typeBadge=r.type==='Call'?'tg-c':r.type==='Distribution'?'tg-d':'tg-a';
+    const dCol=r.deltaPct!=null?(r.deltaPct>=0?'var(--indigo)':'var(--emerald)'):'var(--t3)';
+    const dSign=r.deltaPct!=null&&r.deltaPct>=0?'+':'';
+    const dText=r.deltaPct!=null?`${dSign}${r.deltaPct.toFixed(1)}%`:'—';
+    tRows+=`<tr style="${trStyle};cursor:pointer" onclick="viewNotice('${r.notice.id}')">
+      <td style="padding:6px 8px;font-size:11px;color:var(--t2)">${isCur?'▶ ':' '}${r.idx}</td>
+      <td style="padding:6px 8px;font-size:11px">${r.date||'N/A'}</td>
+      <td style="padding:6px 8px"><span class="tg ${typeBadge}" style="font-size:10px;padding:1px 6px;border-radius:6px">${r.type==='Call'?'Call':r.type==='Distribution'?'Dist':'Adj'}</span></td>
+      <td style="padding:6px 8px;text-align:right;font-size:12px">${fA(r.unfPrior)}</td>
+      <td style="padding:6px 8px;text-align:right;font-size:12px">${fA(r.caAmount,true)}</td>
+      <td style="padding:6px 8px;text-align:right;font-size:12px">${fA(r.unfAfter)}</td>
+      <td style="padding:6px 8px;text-align:right;font-size:12px">${fA(r.funded)}</td>
+      <td style="padding:6px 8px;text-align:right;font-size:12px;font-weight:600">${r.pct!=null?r.pct.toFixed(1)+'%':'—'}</td>
+      <td style="padding:6px 8px;text-align:right;font-size:11px;font-weight:600;color:${dCol}">${dText}</td>
+    </tr>`;
+  });
+
+  const secC=`<div class="sec" style="margin-bottom:16px">
+    <div class="sh"><div class="st">Notice별 상세</div></div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:700px">
+        <thead><tr style="border-bottom:2px solid var(--bdr)">
+          <th style="padding:6px 8px;text-align:left;color:var(--t3);font-size:10px;font-weight:600">#</th>
+          <th style="padding:6px 8px;text-align:left;color:var(--t3);font-size:10px;font-weight:600">Date</th>
+          <th style="padding:6px 8px;text-align:left;color:var(--t3);font-size:10px;font-weight:600">Type</th>
+          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">Unfunded Prior</th>
+          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">약정 영향</th>
+          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">Unfunded After</th>
+          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">Funded After</th>
+          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">소진율</th>
+          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">Δ</th>
+        </tr></thead>
+        <tbody>${tRows}</tbody>
+      </table>
+    </div>
+  </div>`;
+
+  // ── SECTION D: Insights ──
+  let insights=[];
+
+  // D-C1: Commitment 변경 감지
+  const commitVals=[...new Set(rows.map(r=>r.commit).filter(v=>v!=null))];
+  if(commitVals.length>1){
+    let changes=[];
+    for(let i=1;i<rows.length;i++){
+      if(rows[i].commit!=null&&rows[i-1].commit!=null&&rows[i].commit!==rows[i-1].commit){
+        changes.push(`Notice #${rows[i-1].idx} (${fA(rows[i-1].commit)}) → #${rows[i].idx} (${fA(rows[i].commit)})`);
+      }
+    }
+    if(changes.length){
+      insights.push(`<div class="al warn"><span class="ai">⚠️</span><div><strong>Commitment 변경 감지</strong><br>${changes.join('<br>')}
+        <br><span style="color:var(--t3)">Subsequent Close 등에 의한 약정 변경 여부를 확인하세요.</span></div></div>`);
+    }
+  }
+
+  // D-C2: Unfunded 연속성 확인
+  if(rows.length>=2){
+    const mismatches=[];
+    for(let i=1;i<rows.length;i++){
+      const prevAfter=rows[i-1].unfAfter;
+      const curPrior=rows[i].unfPrior;
+      if(prevAfter!=null&&curPrior!=null&&Math.abs(prevAfter-curPrior)>0.01){
+        mismatches.push({from:rows[i-1].idx,to:rows[i].idx,prevAfter,curPrior});
+      }
+    }
+    if(!mismatches.length){
+      insights.push(`<div style="padding:10px 14px;border-radius:var(--r);background:rgba(78,154,109,.06);font-size:12px;margin-bottom:12px;line-height:1.7">
+        <span style="color:var(--emerald);font-weight:600">✓</span>
+        <span style="color:var(--t2)"> Notice 간 약정소진액 현황이 모두 연결되고 있습니다.</span>
+        <span style="color:var(--t3);font-size:11px"> (${rows.length}건 중 ${rows.length-1}개 구간 확인)</span>
+      </div>`);
+    } else {
+      let mmList=mismatches.map(m=>`<div style="margin-left:12px;color:var(--t2)">· Notice #${m.from} → #${m.to}: After ${fA(m.prevAfter)} ≠ Prior ${fA(m.curPrior)}</div>`).join('');
+      insights.push(`<div style="padding:10px 14px;border-radius:var(--r);background:var(--bg3);font-size:12px;margin-bottom:12px;line-height:1.8">
+        <div style="color:var(--t1);font-weight:500">Notice 간 약정소진액 현황 불일치가 감지되었습니다.</div>
+        <div style="margin-top:4px">${mmList}</div>
+      </div>`);
+    }
+  } else {
+    insights.push(`<div style="padding:10px 14px;border-radius:var(--r);background:var(--bg3);font-size:12px;margin-bottom:12px;color:var(--t3)">
+      — Notice가 2건 이상이면 연속성 확인이 가능합니다.
+    </div>`);
+  }
+
+  // D-P1: Call 빈도
+  const callRows=rows.filter(r=>r.type==='Call'&&r.date);
+  if(callRows.length>=2){
+    const callDates=callRows.map(r=>new Date(r.date));
+    let totalMonths=0;
+    for(let i=1;i<callDates.length;i++) totalMonths+=(callDates[i]-callDates[i-1])/(1000*60*60*24*30);
+    const avgMonths=totalMonths/(callDates.length-1);
+    if(avgMonths>0){
+      insights.push(`<div style="padding:10px 14px;border-radius:var(--r);background:var(--bg3);font-size:12px;margin-bottom:12px;color:var(--t2);line-height:1.7">
+        ℹ️ 평균 <strong>${avgMonths.toFixed(1)}개월</strong> 간격으로 Capital Call이 발생하고 있습니다.
+      </div>`);
+    }
+  }
+
+  // D-P2: 평균 Call 규모
+  if(callRows.length>=2&&latestCommit){
+    const avgCall=callRows.reduce((s,r)=>s+Math.abs(r.caAmount||0),0)/callRows.length;
+    const avgPct=(avgCall/latestCommit)*100;
+    insights.push(`<div style="padding:10px 14px;border-radius:var(--r);background:var(--bg3);font-size:12px;margin-bottom:12px;color:var(--t2);line-height:1.7">
+      ℹ️ 평균 Capital Call 규모: <strong>${fA(avgCall)}</strong> (Commitment의 ${avgPct.toFixed(1)}%)
+    </div>`);
+  }
+
+  // D-P3: 최근 비활동
+  if(lastDate){
+    const monthsAgo=Math.round((new Date()-new Date(lastDate))/(1000*60*60*24*30));
+    if(monthsAgo>=6){
+      insights.push(`<div style="padding:10px 14px;border-radius:var(--r);background:var(--bg3);font-size:12px;margin-bottom:12px;color:var(--t2);line-height:1.7">
+        ℹ️ 마지막 Notice: <strong>${lastDate}</strong> (${monthsAgo}개월 전)
+      </div>`);
+    }
+  }
+
+  const secD=insights.length?`<div class="sec"><div class="sh"><div class="st">Insights</div></div>${insights.join('')}</div>`:'';
+
+  return`<div>${secA}${secB}${secC}${secD}</div>`;
 }
 
 /* ===== PORTFOLIO DEMO: Fund merge + Notice move animation ===== */
@@ -5384,6 +5704,7 @@ function deleteNotice(id){
   if(!confirm('이 Notice를 삭제하시겠습니까?'))return;
   authFetch(`${API}/api/notices/${id}`,{method:'DELETE'}).catch(e=>console.warn('Delete failed:',e));
   S.notices=S.notices.filter(n=>n.id!==id);
+  _pdfCache.delete(id); _idbDelete(id); // clean PDF caches
   if(S.activeNoticeId===id){S.activeNoticeId=S.notices.length?S.notices[S.notices.length-1].id:null;S.page=S.notices.length?'portfolio':'upload';}
   R();
 }
