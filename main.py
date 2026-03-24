@@ -2551,18 +2551,30 @@ async def save_favorites(body: dict, request: Request):
 
 @app.get("/api/admin/organizations")
 async def admin_list_organizations(request: Request):
-    """List all organizations with stats. Admin only."""
+    """List all organizations with stats. Admin only.
+    notice_count uses unique duplicate_key to avoid counting copies."""
     admin = await require_admin(request)
     orgs = db_list("organizations", order_col="created_at", order_desc=False)
     result = []
     for o in orgs:
-        notice_count = len(db_list("notices", org_id=o["id"]))
+        notices = db_list("notices", org_id=o["id"])
+        # Count unique notices (by duplicate_key, fallback to id)
+        seen_keys = set()
+        for n in notices:
+            key = n.get("duplicate_key") or n.get("pdf_hash") or n["id"]
+            seen_keys.add(key)
         user_count = len(db_list("user_roles", org_id=o["id"]))
         result.append({
             "id": o["id"], "name": o["name"], "is_system": o.get("is_system", False),
-            "notice_count": notice_count, "user_count": user_count,
+            "notice_count": len(seen_keys), "user_count": user_count,
         })
-    return result
+    # Calculate total unique notices across all orgs
+    all_notices = db_list("notices")
+    all_keys = set()
+    for n in all_notices:
+        key = n.get("duplicate_key") or n.get("pdf_hash") or n["id"]
+        all_keys.add(key)
+    return {"orgs": result, "total_unique": len(all_keys)}
 
 @app.get("/api/admin/users")
 async def admin_list_users(request: Request):

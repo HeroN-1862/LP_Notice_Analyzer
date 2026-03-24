@@ -458,6 +458,7 @@ async function doLogout() {
   S._favorites = [];
   S._favoritesActive = false;
   S._adminOrgs = [];
+  S._adminTotalUnique = 0;
   S._adminOrgFilter = null;
   S.notices = [];
   S.page = 'login';
@@ -499,6 +500,7 @@ const S = {
   _favoritesActive: false,
   _adminOrgFilter: null, // admin org filter: org_id or 'all'
   _adminOrgs: [],        // admin org list cache
+  _adminTotalUnique: 0,  // total unique notices across all orgs
   _orgAssign: null,      // org assignment popup data
   _noticeOrgMap: null,   // admin portfolio management data
 };
@@ -1088,7 +1090,7 @@ function pgAdminOrgCards(){
     </div>`;
   });
   const allAct=S._adminOrgFilter==='all'||!S._adminOrgFilter;
-  const totalN=S._adminOrgs.reduce((s,o)=>s+o.notice_count,0);
+  const totalN=S._adminTotalUnique||S._adminOrgs.reduce((s,o)=>s+o.notice_count,0);
   cards.push(`<div onclick="adminFilterOrg('all')" style="flex:1;min-width:140px;padding:14px 16px;background:${allAct?'var(--indigo-d)':'var(--bg2)'};border:1px solid ${allAct?'var(--indigo)':'var(--bdr)'};border-radius:var(--rl);cursor:pointer;transition:all .15s;text-align:center">
     <div style="font-size:13px;font-weight:600;color:${allAct?'var(--indigo)':'var(--t1)'}">All</div>
     <div style="font-size:11px;color:var(--t3);margin-top:4px">${totalN} notices</div>
@@ -1099,7 +1101,17 @@ function pgAdminOrgCards(){
 async function loadAdminOrgs(){
   try{
     const r=await authFetch(`${API}/api/admin/organizations`);
-    if(r.ok) S._adminOrgs=await r.json();
+    if(r.ok){
+      const data=await r.json();
+      // Handle new format {orgs:[...], total_unique:N} and legacy format [...]
+      if(Array.isArray(data)){
+        S._adminOrgs=data;
+        S._adminTotalUnique=data.reduce((s,o)=>s+o.notice_count,0);
+      } else {
+        S._adminOrgs=data.orgs||[];
+        S._adminTotalUnique=data.total_unique||0;
+      }
+    }
   }catch(e){}
 }
 
