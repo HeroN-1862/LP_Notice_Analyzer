@@ -680,7 +680,7 @@ function renderSB(){
     <div class="sb-head"><div class="sb-logo" onclick="location.reload()" style="cursor:pointer" title="새로고침"><i>N</i><span>Notice Analyzer</span></div></div>
     <div style="padding:4px 6px 0">
       <div class="sb-gl">메뉴</div>
-      <div class="sb-it ${S.page==='upload'?'act':''} ${!S.connected||_userRole==='viewer'?'dis':''}" onclick="${_userRole==='viewer'?'alert(\"열람 전용 계정입니다\")':'go(\"upload\")'}" ${_userRole==='viewer'?'title="열람 전용 계정"':''}><span class="ic">+</span><span>PDF 업로드</span>${uploadBadge}</div>
+      <div class="sb-it ${S.page==='upload'?'act':''} ${!S.connected||_userRole==='viewer'?'dis':''}" onclick="${_userRole==='viewer'?'alert(&quot;열람 전용 계정입니다&quot;)':'go(&quot;upload&quot;)'}" ${_userRole==='viewer'?'title="열람 전용 계정"':''}><span class="ic">+</span><span>PDF 업로드</span>${uploadBadge}</div>
       <div class="sb-it ${S.page==='portfolio'?'act':''} ${!notices.length?'dis':''}" onclick="go('portfolio')"><span class="ic">◈</span><span>Portfolio</span>
         ${notices.length?`<span class="badge ok">${notices.length}</span>`:''}</div>
       <div class="sb-it ${S.page==='favorites'?'act':''}" onclick="go('favorites')"><span class="ic">★</span><span>Favorites</span>
@@ -1288,9 +1288,21 @@ async function toggleNoticeOrg(noticeId, orgId, checked, sourceId){
     if(!result.ok && result.detail){
       alert(result.detail);
     }
-    // Reload map
+    // Reload all admin data so Portfolio/sidebar reflect changes
     S._noticeOrgMap=null;
-    await loadNoticeOrgMap();
+    S._adminOrgs=[];
+    await Promise.all([loadNoticeOrgMap(), loadAdminOrgs()]);
+    // Reload notices list (so Portfolio page and sidebar update)
+    try{
+      const orgFilter=S._adminOrgFilter;
+      const url=orgFilter&&orgFilter!=='all'?`${API}/api/notices?org_id=${encodeURIComponent(orgFilter)}`:`${API}/api/notices`;
+      const nr=await authFetch(url);
+      if(nr.ok){
+        S.notices=await nr.json();
+        S.notices.forEach(n=>{ n._raw_org_id=n.org_id||''; });
+        S.notices.forEach(n=>{normalizeNames(n.header);deriveHeaderFields(n.header);});
+      }
+    }catch(e){}
   }catch(e){
     alert('기관 배정 변경 실패: '+e.message);
     S._noticeOrgMap=null;
@@ -2737,10 +2749,9 @@ function rDashboard(h,items){
   const unfPrior=pN(h.Unfunded_prior);
   const unfAfter=pN(h.Unfunded_after);
   const commit=pN(h.Commitment_original);
-  const cumAfter=pN(h.CumContribAfter);
-  const cumBefore=pN(h.CumContribPrior);
-  const afterPct=commit&&cumAfter!=null?((cumAfter/commit)*100):null;
-  const priorPct=commit&&cumBefore!=null?((cumBefore/commit)*100):null;
+  // Donut %: 1 - (Unfunded / Commitment) = called-up ratio
+  const afterPct=commit&&unfAfter!=null?((1-unfAfter/commit)*100):null;
+  const priorPct=commit&&unfPrior!=null?((1-unfPrior/commit)*100):null;
   const deltaPct=(afterPct!=null&&priorPct!=null)?rd(afterPct-priorPct):null;
   const afterPctStr=afterPct!=null?afterPct.toFixed(1):null;
 
