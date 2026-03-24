@@ -500,6 +500,7 @@ const S = {
   _adminOrgFilter: null, // admin org filter: org_id or 'all'
   _adminOrgs: [],        // admin org list cache
   _orgAssign: null,      // org assignment popup data
+  _noticeOrgMap: null,   // admin portfolio management data
 };
 let _noticeCounter = 0;
 let _batchCounter = 0;
@@ -684,7 +685,8 @@ function renderSB(){
         ${notices.length?`<span class="badge ok">${notices.length}</span>`:''}</div>
       <div class="sb-it ${S.page==='favorites'?'act':''}" onclick="go('favorites')"><span class="ic">★</span><span>Favorites</span>
         ${favs.length?`<span class="badge ok">${favs.length}</span>`:''}</div>
-      ${_userRole==='admin'?`<div class="sb-it ${S.page==='admin'?'act':''}" onclick="goAdmin()"><span class="ic">👤</span><span>사용자 관리</span></div>`:''}
+      ${_userRole==='admin'?`<div class="sb-it ${S.page==='admin'?'act':''}" onclick="goAdmin()"><span class="ic">👤</span><span>사용자 관리</span></div>
+      <div class="sb-it ${S.page==='admin_portfolio'?'act':''}" onclick="go('admin_portfolio')"><span class="ic">📋</span><span>Portfolio 관리</span></div>`:''}
       ${notices.length?`<div class="sb-div"></div><div class="sb-gl" style="display:flex;align-items:center;justify-content:space-between">
         <span>Notices (${window._sbFilteredCount!==undefined?window._sbFilteredCount:notices.length})</span>
         <span onclick="sbCollapseAll()" style="cursor:pointer;font-size:10px;color:var(--t3);padding:2px 6px;border-radius:3px;border:1px solid var(--bdr);user-select:none;transition:all .12s" onmouseover="this.style.color='var(--t1)'" onmouseout="this.style.color='var(--t3)'" title="${_sbAllCollapsed?'모든 펀드 Notice 펼치기':'모든 펀드 Notice 접기'}">${_sbAllCollapsed?'펼치기':'접기'}</span>
@@ -893,6 +895,7 @@ function renderPG(){
     case'favorites':h.innerHTML='<h1>★ 담당 펀드 설정</h1><p>관심 펀드를 선택하면 사이드바에 해당 펀드의 Notice만 표시됩니다</p>';b.innerHTML=pgFavorites();break;
     case'result':renderResultPG(h,b);break;
     case'admin':h.innerHTML='<h1>사용자 관리</h1><p>가입된 사용자 목록 및 데이터 관리</p>';b.innerHTML=pgAdmin();if(!S._adminUsers.length)loadAdminUsers();break;
+    case'admin_portfolio':h.innerHTML='<h1>📋 Portfolio 관리</h1><p>Notice의 기관 배정을 관리합니다</p>';b.innerHTML=pgAdminPortfolio();if(!S._noticeOrgMap)loadNoticeOrgMap();break;
   }
   // Global popups — render regardless of current page
   let globalPopups='';
@@ -1192,6 +1195,106 @@ async function execOrgAssign(mode){
     await loadFromBackend();
   }catch(e){
     alert('기관 배정 실패: '+e.message);
+  }
+}
+
+/* ===== ADMIN PORTFOLIO MANAGEMENT ===== */
+
+async function loadNoticeOrgMap(){
+  try{
+    const r=await authFetch(`${API}/api/admin/notice-org-map`);
+    if(r.ok){
+      S._noticeOrgMap=await r.json();
+      if(S.page==='admin_portfolio') R();
+    }
+  }catch(e){console.warn('Notice org map load failed:',e);}
+}
+
+function pgAdminPortfolio(){
+  const m=S._noticeOrgMap;
+  if(!m) return'<div style="text-align:center;padding:60px;color:var(--t3)">데이터를 불러오는 중...</div>';
+  const notices=m.notices||[];
+  const orgs=m.orgs||[];
+  if(!notices.length) return'<div style="text-align:center;padding:60px;color:var(--t3)">Notice가 없습니다</div>';
+  if(!orgs.length) return'<div style="text-align:center;padding:60px;color:var(--t3)">기관이 없습니다</div>';
+
+  // Group by duplicate_key to find which orgs have copies
+  const groups={};
+  notices.forEach(n=>{
+    const gk=n.duplicate_key||n.pdf_hash||n.id;
+    if(!groups[gk]) groups[gk]={key:gk,notices:[],fund:'',date:'',type:'',net:null,fileName:''};
+    groups[gk].notices.push(n);
+    if(!groups[gk].fund) groups[gk].fund=n.fund;
+    if(!groups[gk].date) groups[gk].date=n.issue_date;
+    if(!groups[gk].type) groups[gk].type=n.notice_type;
+    if(groups[gk].net===null) groups[gk].net=n.net_amount;
+    if(!groups[gk].fileName) groups[gk].fileName=n.file_name;
+  });
+
+  const groupList=Object.values(groups).sort((a,b)=>{
+    const fa=a.fund.toLowerCase(),fb=b.fund.toLowerCase();
+    if(fa!==fb) return fa.localeCompare(fb);
+    return (b.date||'').localeCompare(a.date||'');
+  });
+
+  const typeColor=(t)=>t==='Call'?'var(--indigo)':t==='Distribution'?'var(--teal)':'var(--amber)';
+
+  return'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">'
+    +'<thead><tr style="background:var(--bg4);border-bottom:2px solid var(--bdr)">'
+    +'<th style="padding:8px 10px;text-align:left;font-weight:600;white-space:nowrap">Fund</th>'
+    +'<th style="padding:8px 6px;text-align:left;font-weight:600">Date</th>'
+    +'<th style="padding:8px 6px;text-align:left;font-weight:600">Type</th>'
+    +'<th style="padding:8px 6px;text-align:right;font-weight:600">Net Amount</th>'
+    +orgs.map(o=>'<th style="padding:8px 6px;text-align:center;font-weight:600;min-width:80px">'+escH(o.name)+'</th>').join('')
+    +'</tr></thead><tbody>'
+    +groupList.map(g=>{
+      // For each org, find if a notice copy exists
+      const orgMap={};
+      g.notices.forEach(n=>{ orgMap[n.org_id]=n.id; });
+      // Pick a source notice id (any one for copying)
+      const sourceId=g.notices[0].id;
+
+      return'<tr style="border-bottom:1px solid var(--bdr);transition:background .1s" onmouseover="this.style.background=\'var(--bg4)\'" onmouseout="this.style.background=\'\'">'
+        +'<td style="padding:6px 10px;font-weight:500;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+escH(g.fileName)+'">'+escH(g.fund||g.fileName)+'</td>'
+        +'<td style="padding:6px;color:var(--t2)">'+escH(g.date||'')+'</td>'
+        +'<td style="padding:6px"><span style="font-size:11px;font-weight:600;color:'+typeColor(g.type)+'">'+escH(g.type||'')+'</span></td>'
+        +'<td style="padding:6px;text-align:right;font-family:var(--f);font-variant-numeric:tabular-nums">'+(g.net!=null?fA(g.net):'')+'</td>'
+        +orgs.map(o=>{
+          const hasIt=!!orgMap[o.id];
+          const nid=orgMap[o.id]||sourceId;
+          return'<td style="padding:6px;text-align:center">'
+            +'<input type="checkbox" '+(hasIt?'checked ':'')+' style="width:16px;height:16px;cursor:pointer" '
+            +'onchange="toggleNoticeOrg(\''+nid+'\',\''+o.id+'\',this.checked,\''+sourceId+'\')"'
+            +'/></td>';
+        }).join('')
+        +'</tr>';
+    }).join('')
+    +'</tbody></table></div>'
+    +'<div style="margin-top:12px;font-size:11px;color:var(--t3)">체크박스를 클릭하면 해당 기관에 Notice가 추가/제거됩니다. 같은 Notice의 독립 복사본이 생성됩니다.</div>'
+    +'<div style="margin-top:8px"><button class="btn btn-sm btn-s" onclick="S._noticeOrgMap=null;loadNoticeOrgMap()">↻ 새로고침</button></div>';
+}
+
+async function toggleNoticeOrg(noticeId, orgId, checked, sourceId){
+  try{
+    const resp=await authFetch(`${API}/api/admin/notice-org-toggle`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        notice_id: checked ? sourceId : noticeId,
+        org_id: orgId,
+        action: checked ? 'add' : 'remove'
+      })
+    });
+    const result=await resp.json();
+    if(!result.ok && result.detail){
+      alert(result.detail);
+    }
+    // Reload map
+    S._noticeOrgMap=null;
+    await loadNoticeOrgMap();
+  }catch(e){
+    alert('기관 배정 변경 실패: '+e.message);
+    S._noticeOrgMap=null;
+    loadNoticeOrgMap();
   }
 }
 

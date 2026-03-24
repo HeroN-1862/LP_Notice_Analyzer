@@ -1,5 +1,5 @@
 """
-LP Notice Analyzer — Backend Server
+LP Notice Analyzer - Backend Server
 Run: uvicorn main:app --reload --port 8000
 """
 import os, json, base64, io, time, hashlib, asyncio
@@ -2723,6 +2723,99 @@ async def admin_copy_notice(notice_id: str, body: dict, request: Request):
         print(f"  [ADMIN] Copied notice {notice_id} → {new_id} (org: {org_id})")
 
     return {"ok": True, "source_id": notice_id, "created": created}
+
+
+@app.get("/api/admin/notice-org-map")
+async def admin_notice_org_map(request: Request):
+    """Return all notices with org assignment info for admin portfolio management.
+    Groups notices by pdf_hash to identify same-PDF across orgs."""
+    admin = await require_admin(request)
+    all_notices = db_list("notices", order_col="created_at", order_desc=True)
+    orgs = [o for o in db_list("organizations", order_col="created_at") if not o.get("is_system")]
+
+    # Build map: pdf_hash -> list of (notice_id, org_id)
+    result = []
+    for r in all_notices:
+        header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
+        result.append({
+            "id": r["id"],
+            "file_name": r.get("file_name", ""),
+            "org_id": r.get("org_id", ""),
+            "pdf_hash": r.get("pdf_hash", ""),
+            "duplicate_key": r.get("duplicate_key", ""),
+            "fund": header.get("Underlying_Fund_Name_short", "") or header.get("Fund_ID_Key", ""),
+            "fund_key": header.get("Fund_ID_Key", ""),
+            "lp_short": header.get("LP_Name_short", ""),
+            "issue_date": header.get("issue_date", ""),
+            "notice_type": header.get("notice_type", ""),
+            "net_amount": header.get("LP_net_amount"),
+        })
+
+    return {"notices": result, "orgs": [{"id": o["id"], "name": o["name"]} for o in orgs]}
+
+
+@app.post("/api/admin/notice-org-toggle")
+async def admin_notice_org_toggle(body: dict, request: Request):
+    """Toggle a notice's presence in a specific org.
+    If notice exists in org -> remove it. If not -> copy it there."""
+    admin = await require_admin(request)
+    notice_id = body.get("notice_id", "")
+    target_org = body.get("org_id", "")
+    action = body.get("action", "")  # 'add' or 'remove'
+
+    if not notice_id or not target_org or action not in ("add", "remove"):
+        raise HTTPException(400, "notice_id, org_id, and action ('add'/'remove') required")
+
+    if action == "remove":
+        # Find the notice copy in this org and delete it
+        r = db_get("notices", notice_id)
+        if r and r.get("org_id") == target_org:
+            db_delete("notices", notice_id)
+            delete_storage(notice_id)
+            print(f"  [ADMIN] Removed notice {notice_id} from {target_org}")
+            return {"ok": True, "action": "removed", "notice_id": notice_id}
+        # Maybe it's a different copy - find by pdf_hash in that org
+        return {"ok": False, "detail": "Notice not found in that org"}
+
+    elif action == "add":
+        # Copy the source notice to target org
+        source = db_get("notices", notice_id)
+        if not source:
+            raise HTTPException(404, "Source notice not found")
+
+        org = db_get("organizations", target_org)
+        if not org:
+            raise HTTPException(404, "Organization not found")
+
+        # Check if already exists in target org (by duplicate_key)
+        if source.get("duplicate_key"):
+            existing = get_supa().table("notices").select("id").eq("duplicate_key", source["duplicate_key"]).eq("org_id", target_org).limit(1).execute()
+            if existing.data:
+                return {"ok": True, "action": "already_exists", "existing_id": existing.data[0]["id"]}
+
+        header = source["header"] if isinstance(source["header"], dict) else json.loads(source["header"] or "{}")
+        line_items = source["line_items"] if isinstance(source["line_items"], list) else json.loads(source["line_items"] or "[]")
+
+        new_id = f"{notice_id}_cp{target_org[-8:]}"
+        try: db_delete("notices", new_id)
+        except: pass
+
+        db_insert("notices", {
+            "id": new_id,
+            "file_name": source.get("file_name", ""),
+            "user_id": admin["id"],
+            "org_id": target_org,
+            "header": header,
+            "line_items": line_items,
+            "raw_ai_response": source.get("raw_ai_response", ""),
+            "pdf_hash": source.get("pdf_hash", ""),
+            "page_count": source.get("page_count", 0),
+            "duplicate_key": source.get("duplicate_key", ""),
+        })
+        copy_storage(notice_id, new_id)
+
+        print(f"  [ADMIN] Added notice copy {new_id} to {target_org}")
+        return {"ok": True, "action": "added", "new_id": new_id, "org_id": target_org}
 
 
 # ── Health ──────────────────────────────────────────────
