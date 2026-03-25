@@ -494,6 +494,7 @@ const S = {
   qaMessages:[], qaLoading:false,
   treeOpen: {},
   sbOpen: {},
+  sbLpOpen: {},  // LP-level collapse: fundKey_lpKey → bool
   geminiModel: 'gemini-3-flash-preview',
   geminiTemperature: 0.1,
   geminiModels: [],
@@ -676,12 +677,14 @@ let _sbAllCollapsed=false; // tracks last bulk action for button label
 
 function sbCollapseAll(){
   if(_sbAllCollapsed){
-    // Expand all
+    // Expand all funds + LPs
     if(window._sbFundKeys) window._sbFundKeys.forEach(k=>{ S.sbOpen[k]=true; });
+    Object.keys(S.sbLpOpen).forEach(k=>{ S.sbLpOpen[k]=true; });
     _sbAllCollapsed=false;
   } else {
-    // Collapse all
+    // Collapse all funds + LPs
     if(window._sbFundKeys) window._sbFundKeys.forEach(k=>{ S.sbOpen[k]=false; });
+    Object.keys(S.sbLpOpen).forEach(k=>{ S.sbLpOpen[k]=false; });
     _sbAllCollapsed=true;
   }
   R();
@@ -804,13 +807,16 @@ function renderSB(){
                 const _sbLpNA2=!lp.lpFull||lp.lpFull==='N/A'||lp.lpFull==='Unknown LP';
                 const lpDispName=_sbLpNA2?(lp.lpCode||'N/A'):(S.nameReg.lp[lp.lpFull]||lp.lpShort);
                 const lpLabel=(!_sbLpNA2&&lp.lpCode)?lpDispName+' · '+lp.lpCode:lpDispName;
+                const lpOpenKey=fKey+'__'+lpKey;
+                const isLpOpen=S.sbLpOpen[lpOpenKey]!==false;
                 const sorted=lp.notices.slice().sort((a,b)=>{
                   const da=fmtDate(a.header.issue_date||a.header.due_date||'');
                   const db=fmtDate(b.header.issue_date||b.header.due_date||'');
                   return da.localeCompare(db);
                 });
-                return`${multiLp?`<div style="padding:3px 10px 2px 26px;font-size:11px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px" title="${escH(lp.lpFull)}"><span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:var(--slate-d);color:var(--slate);font-size:8px;font-weight:700;text-align:center;line-height:12px;margin-right:3px;vertical-align:middle">LP</span>${escH(lpLabel)}</div>`:''}
-                ${sorted.map(n=>{
+                const lpHeader=multiLp?`<div style="padding:3px 10px 2px 20px;font-size:11px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;cursor:pointer;display:flex;align-items:center;gap:4px" onclick="event.stopPropagation();toggleSbLp('${escH(lpOpenKey)}')" title="${escH(lp.lpFull)}"><span style="font-size:8px;transition:transform .15s;transform:rotate(${isLpOpen?'90':'0'}deg);flex-shrink:0;color:var(--t3)">▶</span><span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:var(--slate-d);color:var(--slate);font-size:8px;font-weight:700;text-align:center;line-height:12px;flex-shrink:0">LP</span><span style="overflow:hidden;text-overflow:ellipsis;flex:1">${escH(lpLabel)}</span><span style="font-size:10px;color:var(--t3);flex-shrink:0">${lp.notices.length}</span></div>`:'';
+                return`${lpHeader}
+                ${!multiLp||isLpOpen?sorted.map(n=>{
                   const isPendingLp=!!n.header._pending_lp;
                   const due=isPendingLp?'LP 입력 대기':fmtDate(n.header.issue_date||n.header.due_date||'N/A');
                   const st=isPendingLp?'none':getNoticeStatus(n);
@@ -826,7 +832,7 @@ function renderSB(){
                     <span class="n-text" style="${n.is_voided?'text-decoration:line-through;opacity:.5':''}${isPendingLp?'color:var(--amber);font-style:italic':''}">${due}</span>
                     ${supersedeBadge}${statusDot}
                   </div>`;
-                }).join('')}`;
+                }).join(''):''}`;
               }).join('')}
             </div>`:''}
           </div>`;
@@ -879,6 +885,7 @@ function goAdmin(){
   S.page='admin';R();
 }
 function toggleSbFund(idx){const k=window._sbFundKeys[idx];S.sbOpen[k]=S.sbOpen[k]===false?true:false;R();}
+function toggleSbLp(lpOpenKey){S.sbLpOpen[lpOpenKey]=S.sbLpOpen[lpOpenKey]===false?true:false;R();}
 function viewNotice(id,autoCorrect){
   const n=S.notices.find(x=>x.id===id);
 
@@ -1515,6 +1522,22 @@ function pgSettings(){
       <div style="font-size:12px;color:var(--t2);margin-bottom:8px">💾 서버에 <strong>${S.notices.length}건</strong>의 Notice가 저장되어 있습니다.</div>
       <button class="btn-danger" style="width:100%" onclick="clearStorage()">🗑️ 전체 초기화</button>
     </div>`:''}
+
+    <!-- 비밀번호 변경 -->
+    <div style="margin-top:20px;padding-top:14px;border-top:1px solid var(--bdr)">
+      <h3 style="font-size:13px;font-weight:700;color:var(--t1);margin:0 0 14px 0">🔒 비밀번호 변경</h3>
+      <div style="margin-bottom:10px">
+        <label style="font-size:11px;font-weight:600;color:var(--t2);display:block;margin-bottom:4px">새 비밀번호</label>
+        <input type="password" id="pwNew" placeholder="6자리 이상" style="width:100%;padding:8px 10px;border:1px solid var(--bdr);border-radius:var(--r);font-size:12px;background:var(--bg1);color:var(--t1);box-sizing:border-box"/>
+      </div>
+      <div style="margin-bottom:12px">
+        <label style="font-size:11px;font-weight:600;color:var(--t2);display:block;margin-bottom:4px">새 비밀번호 확인</label>
+        <input type="password" id="pwConfirm" placeholder="비밀번호 재입력" style="width:100%;padding:8px 10px;border:1px solid var(--bdr);border-radius:var(--r);font-size:12px;background:var(--bg1);color:var(--t1);box-sizing:border-box"/>
+      </div>
+      <button class="btn btn-p" style="width:100%" onclick="changePassword()">비밀번호 변경</button>
+      <div id="pwChangeMsg" style="font-size:11px;text-align:center;margin-top:6px;min-height:16px"></div>
+    </div>
+
   </div></div>`;
 }
 function onModelChange(val){ S.geminiModel=val; }
@@ -1525,6 +1548,24 @@ async function saveGeminiSettings(){
     const r=await authFetch(`${API}/api/settings`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({gemini_model:S.geminiModel,gemini_temperature:S.geminiTemperature})});
     if(r.ok){const d=await r.json();S.geminiModel=d.gemini_model;S.geminiTemperature=d.gemini_temperature;const msg=document.getElementById('settingsSaveMsg');if(msg){msg.textContent='✓ 저장 완료';setTimeout(()=>{msg.textContent='';},2000);}}
   }catch(e){const msg=document.getElementById('settingsSaveMsg');if(msg)msg.textContent='저장 실패: '+e.message;}
+}
+async function changePassword(){
+  const pw=document.getElementById('pwNew')?.value||'';
+  const pw2=document.getElementById('pwConfirm')?.value||'';
+  const msg=document.getElementById('pwChangeMsg');
+  if(!pw){if(msg)msg.textContent='새 비밀번호를 입력하세요.';if(msg)msg.style.color='var(--red)';return;}
+  if(pw.length<6){if(msg){msg.textContent='비밀번호는 6자리 이상이어야 합니다.';msg.style.color='var(--red)';}return;}
+  if(pw!==pw2){if(msg){msg.textContent='비밀번호가 일치하지 않습니다.';msg.style.color='var(--red)';}return;}
+  try{
+    const{error}=await _sb.auth.updateUser({password:pw});
+    if(error) throw error;
+    if(msg){msg.textContent='✓ 비밀번호가 변경되었습니다.';msg.style.color='var(--teal)';}
+    document.getElementById('pwNew').value='';
+    document.getElementById('pwConfirm').value='';
+    setTimeout(()=>{if(msg)msg.textContent='';},3000);
+  }catch(e){
+    if(msg){msg.textContent='변경 실패: '+(e.message||e);msg.style.color='var(--red)';}
+  }
 }
 async function loadGeminiModels(){
   try{const r=await authFetch(`${API}/api/models`);if(r.ok){S.geminiModels=await r.json();}}catch(e){}
@@ -2337,8 +2378,15 @@ function renderResultPG(hEl,bEl){
       <div style="color:var(--t1)">Issue: ${fmtDate(h.issue_date)||'N/A'} · Due: ${fmtDate(h.due_date)||'N/A'}</div>
     </div>
     <div style="display:flex;gap:6px;flex-shrink:0">
+      ${_userRole!=='viewer'?`<div onclick="document.getElementById('_quickUpload').click()" style="padding:5px 14px;font-size:11px;font-weight:600;background:var(--bg2);color:var(--t2);border:1px solid var(--bdr);border-radius:5px;cursor:pointer;white-space:nowrap;transition:all .15s;display:flex;align-items:center;gap:4px" onmouseover="this.style.borderColor='var(--indigo)';this.style.color='var(--indigo)'" onmouseout="this.style.borderColor='var(--bdr)';this.style.color='var(--t2)'" title="PDF 업로드">+ PDF</div>`:``}
       <div onclick="openExportPopup()" style="padding:5px 14px;font-size:11px;font-weight:600;background:var(--indigo-d);color:var(--indigo);border:1px solid rgba(29,53,87,.2);border-radius:5px;cursor:pointer;white-space:nowrap;transition:all .15s;display:flex;align-items:center" onmouseover="this.style.background='var(--indigo)';this.style.color='#fff'" onmouseout="this.style.background='var(--indigo-d)';this.style.color='var(--indigo)'" title="Excel/CSV 내보내기">Export to Excel</div>
     </div></div>`;
+  // Hidden file input for quick upload
+  if(!document.getElementById('_quickUpload')){
+    const inp=document.createElement('input');inp.type='file';inp.id='_quickUpload';inp.accept='.pdf';inp.multiple=true;inp.style.display='none';
+    inp.onchange=()=>{if(inp.files.length){_quickUploadFiles(inp.files);inp.value='';}};
+    document.body.appendChild(inp);
+  }
 
   const _lpName=h.LP_Name_full&&h.LP_Name_full!=='N/A'&&h.LP_Name_full!=='Unknown LP';
   const _lpCode=h.LP_code&&h.LP_code!=='N/A';
@@ -3409,7 +3457,7 @@ function rWireInfo(n){
         <thead><tr><th>Date</th><th>Cash In/Out</th><th>SWIFT (은행)</th><th>계좌번호 (은행)</th><th>은행명</th><th style="text-align:center">일치</th></tr></thead>
         <tbody>${wireHistory.map(wh=>{
           const isCurrent=wh.id===n.id;
-          return`<tr style="${isCurrent?'background:rgba(79,70,229,.04)':''}">
+          return`<tr style="cursor:pointer;${isCurrent?'background:rgba(79,70,229,.04)':''}" onclick="viewNotice('${wh.id}')">
             <td style="font-variant-numeric:tabular-nums;${isCurrent?'font-weight:600':''}">${wh.date}${isCurrent?' (현재)':''}</td>
             <td><span class="tg ${wh.dir==='outbound'?'tg-c':'tg-d'}" style="border-radius:10px;padding:1px 6px;font-size:10px">${wh.dir==='outbound'?'Out':'In'}</span></td>
             <td style="font-size:11px">${escH(wh.swift||'—')}</td>
@@ -3528,7 +3576,7 @@ function rExposure(n){
     const tp=notice.header.notice_type;
     const isVoid=notice.is_voided;
     const isCur=notice.id===n.id;
-    return`<th style="font-size:9px;white-space:nowrap;padding:6px 4px;min-width:78px;text-align:right;${isVoid?'opacity:.35;':''}${isCur?'background:rgba(45,127,249,.06);':''}">${isVoid?'<span style="font-size:8px;color:var(--t3);display:block">VOID</span>':''}${shortD}<br><span style="font-size:9px;color:${tp==='Call'?'var(--indigo)':tp==='Distribution'?'var(--teal)':'var(--t3)'}">${tp==='Call'?'Call':'Dist.'}</span></th>`;
+    return`<th style="font-size:9px;white-space:nowrap;padding:6px 4px;min-width:78px;text-align:right;cursor:pointer;${isVoid?'opacity:.35;':''}${isCur?'background:rgba(45,127,249,.06);':''}" onclick="viewNotice('${notice.id}')" title="이 Notice로 이동">${isVoid?'<span style="font-size:8px;color:var(--t3);display:block">VOID</span>':''}${shortD}<br><span style="font-size:9px;color:${tp==='Call'?'var(--indigo)':tp==='Distribution'?'var(--teal)':'var(--t3)'}">${tp==='Call'?'Call':'Dist.'}</span></th>`;
   }).join('');
 
   const rows=assetKeys.map(key=>{
@@ -3540,7 +3588,7 @@ function rExposure(n){
     const cells=investMap[key].map((v,ni)=>{
       const isVoid=allFundLp[ni].is_voided;
       const isCur=allFundLp[ni].id===n.id;
-      return`<td class="amt" style="font-size:11px;padding:4px 6px;${isVoid?'opacity:.35;':''}${isCur?'background:rgba(45,127,249,.04);':''}">${fAE(v)}</td>`;
+      return`<td class="amt" style="font-size:11px;padding:4px 6px;cursor:pointer;${isVoid?'opacity:.35;':''}${isCur?'background:rgba(45,127,249,.04);':''}" onclick="viewNotice('${allFundLp[ni].id}')">${fAE(v)}</td>`;
     }).join('');
 
     let net=0;
@@ -3549,7 +3597,7 @@ function rExposure(n){
 
     return`<tr style="border-bottom:1px solid var(--bdr)">
       <td style="font-size:11px;padding:6px 8px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis;position:sticky;left:0;background:var(--bg1);z-index:1" title="${escH([...raw].join(', '))}">${escH(key)}${badge}</td>
-      ${cells}${netCell}
+      ${netCell}${cells}
     </tr>`;
   }).join('');
 
@@ -3558,30 +3606,26 @@ function rExposure(n){
     assetKeys.forEach(k=>{ if(!notice.is_voided) colTotal+=investMap[k][ni]; });
     const isVoid=notice.is_voided;
     const isCur=notice.id===n.id;
-    return`<td class="amt" style="font-size:11px;font-weight:600;padding:4px 6px;${isVoid?'opacity:.35;':''}${isCur?'background:rgba(45,127,249,.04);':''}">${fAE(isVoid?0:colTotal)}</td>`;
+    return`<td class="amt" style="font-size:11px;font-weight:600;padding:4px 6px;cursor:pointer;${isVoid?'opacity:.35;':''}${isCur?'background:rgba(45,127,249,.04);':''}" onclick="viewNotice('${notice.id}')">${fAE(isVoid?0:colTotal)}</td>`;
   }).join('');
   const grandNet=totalCall+totalDist;
   const footNet=`<td class="amt" style="font-size:11px;font-weight:700;padding:4px 8px;background:var(--bg4)">${fAE(grandNet)}</td>`;
 
   return`<div>
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-      <div>
-        <div style="font-size:14px;font-weight:700">Asset Exposure Matrix</div>
-        <div style="font-size:11px;color:var(--t3);margin-top:2px">${escH(fundDisp)} · LP: ${escH(lpDisp)}${lpCode?' · '+lpCode:''}</div>
-      </div>
+    <div style="display:flex;align-items:center;justify-content:flex-end;margin-bottom:12px">
       ${aiBtn}
     </div>
     <div class="tw" style="overflow-x:auto">
       <table class="it" style="min-width:100%">
         <thead><tr style="position:sticky;top:0;z-index:2;background:var(--bg1)">
           <th style="font-size:11px;padding:6px 8px;text-align:left;position:sticky;left:0;background:var(--bg1);z-index:3;min-width:160px">Asset</th>
+          <th style="font-size:11px;padding:6px 8px;text-align:right;background:var(--bg4);min-width:80px">합계</th>
           ${colHeaders}
-          <th style="font-size:11px;padding:6px 8px;text-align:right;background:var(--bg4);min-width:80px">Net</th>
         </tr></thead>
         <tbody>${rows}</tbody>
         <tfoot><tr style="border-top:2px solid var(--bdr);background:var(--bg3)">
           <td style="font-size:11px;font-weight:700;padding:6px 8px;position:sticky;left:0;background:var(--bg3);z-index:1">Total</td>
-          ${footCells}${footNet}
+          ${footNet}${footCells}
         </tr></tfoot>
       </table>
     </div>
@@ -3810,11 +3854,6 @@ function rCommitment(n){
 
   // ── SECTION A: Summary Cards ──
   const secA=`<div class="sec" style="margin-bottom:16px">
-    <div style="font-size:12px;color:var(--t2);margin-bottom:10px;line-height:1.7">
-      <div style="font-weight:600;color:var(--t1)">${escH(h.Underlying_Fund_Name_full||h.Underlying_Fund_Name_short||'')}</div>
-      <div>LP: ${escH(h.LP_Name_full||h.LP_Name_short||'N/A')}${h.LP_code&&h.LP_code!=='N/A'?' · '+escH(h.LP_code):''} · ${escH(currency)}</div>
-      ${periodStr?`<div style="color:var(--t3)">${periodStr}, ${rows.length}건</div>`:''}
-    </div>
     <div class="sec-grid" style="grid-template-columns:repeat(4,1fr)">
       <div class="sec-card"><div class="sc-label">Commitment</div><div class="sc-val">${fA(latestCommit)}</div></div>
       <div class="sec-card"><div class="sc-label">Funded</div><div class="sc-val">${fA(latestFunded)}</div></div>
@@ -6165,6 +6204,20 @@ document.addEventListener('keydown',e=>{
 });
 
 /* Multi-file handling */
+/* Quick upload from result page — stays on current page */
+function _quickUploadFiles(fileList){
+  const files=Array.from(fileList).filter(f=>f.type.includes('pdf'));
+  if(!files.length){alert('PDF 파일만 지원합니다.');return;}
+  // Show brief toast
+  const toast=document.createElement('div');
+  toast.style.cssText='position:fixed;top:20px;left:50%;transform:translateX(-50%);background:var(--indigo);color:#fff;padding:8px 20px;border-radius:6px;font-size:12px;font-weight:600;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.15)';
+  toast.textContent=`📤 ${files.length}건 업로드 시작`;
+  document.body.appendChild(toast);
+  setTimeout(()=>toast.remove(),2000);
+  // Use existing upload pipeline (stays on current page since S.page !== 'upload')
+  handleFiles(fileList);
+}
+
 function handleFiles(fileList){
   const files=Array.from(fileList).filter(f=>f.type.includes('pdf'));
   if(!files.length){alert('PDF 파일만 지원합니다.');return;}
