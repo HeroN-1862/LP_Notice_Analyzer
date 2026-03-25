@@ -886,7 +886,7 @@ function viewNotice(id,autoCorrect){
   }
 
   if(S.activeNoticeId!==id){S.qaMessages=[];_pdfNoticeId=null;}
-  S.page='result';S.activeNoticeId=id;S.activeTab='validation';
+  S.page='result';S.activeNoticeId=id;S.activeTab='overview';
   if(n){_pdfNoticeId=id;_pdfPage=1;_pdfPageCount=n.page_count||0;}
   R();
   if(autoCorrect)runAutoCorrection();
@@ -2314,20 +2314,21 @@ function renderResultPG(hEl,bEl){
       <div style="color:var(--t1)">Issue: ${fmtDate(h.issue_date)||'N/A'} · Due: ${fmtDate(h.due_date)||'N/A'}</div>
     </div>
     <div style="display:flex;gap:6px;flex-shrink:0">
-      ${_userRole==='admin'?`<button style="padding:4px 10px;font-size:11px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;transition:all .15s" onclick="showOrgAssign('${n.id}')" onmouseover="this.style.borderColor='var(--blue)';this.style.color='var(--blue)'" onmouseout="this.style.borderColor='';this.style.color='var(--t3)'" title="기관 배정 (이동/복사)">🏢 기관 배정</button>`:''}
-      ${_userRole!=='viewer'?`<button style="padding:4px 10px;font-size:11px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;transition:all .15s" onclick="reparseNotice('${n.id}')" onmouseover="this.style.borderColor='var(--indigo)';this.style.color='var(--indigo)'" onmouseout="this.style.borderColor='';this.style.color='var(--t3)'" title="저장된 PDF로 AI 재파싱 (재업로드 불필요)">↻ 재파싱</button>
-      <button class="btn-danger" onclick="deleteNotice('${n.id}')">삭제</button>`:''}
+      <div onclick="openExportPopup()" style="padding:5px 14px;font-size:11px;font-weight:600;background:var(--indigo-d);color:var(--indigo);border:1px solid rgba(29,53,87,.2);border-radius:5px;cursor:pointer;white-space:nowrap;transition:all .15s;display:flex;align-items:center" onmouseover="this.style.background='var(--indigo)';this.style.color='#fff'" onmouseout="this.style.background='var(--indigo-d)';this.style.color='var(--indigo)'" title="Excel/CSV 내보내기">Export to Excel</div>
     </div></div>`;
 
   const _lpName=h.LP_Name_full&&h.LP_Name_full!=='N/A'&&h.LP_Name_full!=='Unknown LP';
   const _lpCode=h.LP_code&&h.LP_code!=='N/A';
   const lpMiss=!_lpName||!_lpCode;
+  // 양쪽 다 없을 때만 alert (한쪽만 없으면 자동 채움됨)
   const lpAlertHtml=(!_lpName&&!_lpCode)
     ?`<div class="al warn"><span class="ai">⚠️</span><div><strong>LP 식별 필요</strong> — LP Name과 Code가 모두 없습니다. <button class="btn btn-sm" style="margin-left:5px;background:rgba(217,119,6,.12);color:var(--amber);border:none" onclick="S.showLpModal=true;R()">입력</button></div></div>`
-    :(!_lpName&&_lpCode)
-    ?`<div class="al warn"><span class="ai">⚠️</span><div><strong>LP Name 미식별</strong> — LP Code(${escH(h.LP_code)})만 존재합니다. <button class="btn btn-sm" style="margin-left:5px;background:rgba(217,119,6,.12);color:var(--amber);border:none" onclick="S.showLpModal=true;R()">별도 입력</button><button class="btn btn-sm" style="margin-left:4px;background:rgba(79,70,229,.08);color:var(--indigo);border:none" onclick="autoFillLp('name')">Code를 Name으로 적용</button></div></div>`
-    :(_lpName&&!_lpCode)
-    ?`<div class="al warn"><span class="ai">⚠️</span><div><strong>LP Code 미식별</strong> — LP Name만 존재합니다. <button class="btn btn-sm" style="margin-left:5px;background:rgba(217,119,6,.12);color:var(--amber);border:none" onclick="S.showLpModal=true;R()">별도 입력</button><button class="btn btn-sm" style="margin-left:4px;background:rgba(79,70,229,.08);color:var(--indigo);border:none" onclick="autoFillLp('code')">Name을 Code로 적용</button></div></div>`
+    :'';
+  // 자동 채움 안내 (하단에 배치)
+  const lpAutoFillInfo=h._lp_auto_filled==='code'
+    ?`<div style="font-size:11px;color:var(--indigo);margin-top:12px;padding:8px 12px;background:var(--indigo-d);border-radius:var(--r)">본 건은 LP Code가 미식별되어 자동적으로 LP Name을 같은 값으로 적용하였습니다</div>`
+    :h._lp_auto_filled==='name'
+    ?`<div style="font-size:11px;color:var(--indigo);margin-top:12px;padding:8px 12px;background:var(--indigo-d);border-radius:var(--r)">본 건은 LP Name이 미식별되어 자동적으로 LP Code를 같은 값으로 적용하였습니다</div>`
     :'';
   const voidedByNotice=n.is_voided?S.notices.find(x=>x.id===n.voided_by):null;
   bEl.innerHTML=`<div class="fi">
@@ -2341,28 +2342,31 @@ function renderResultPG(hEl,bEl){
       <div>
         <div class="result-tabs">
           <div class="result-tab ${S.resultTab==='notice'||!S.resultTab?'act':''}" onclick="S.resultTab='notice';R()">Notice</div>
-          <div class="result-tab ${S.resultTab==='wire'?'act':''}" onclick="S.resultTab='wire';R()">Wire Info</div>
-          <div class="result-tab ${S.resultTab==='exposure'?'act':''}" onclick="S.resultTab='exposure';S.rightPanel='hide';R()">Exposure</div>
           <div class="result-tab ${S.resultTab==='commitment'?'act':''}" onclick="S.resultTab='commitment';S.rightPanel='hide';R()">Commitment</div>
-          <div style="flex:1"></div>
-          <div onclick="openExportPopup()" style="padding:5px 14px;font-size:11px;font-weight:600;background:var(--indigo-d);color:var(--indigo);border:1px solid rgba(29,53,87,.2);border-radius:5px;cursor:pointer;white-space:nowrap;transition:all .15s;display:flex;align-items:center" onmouseover="this.style.background='var(--indigo)';this.style.color='#fff'" onmouseout="this.style.background='var(--indigo-d)';this.style.color='var(--indigo)'" title="Excel/CSV 내보내기">Export to Excel</div>
+          <div class="result-tab ${S.resultTab==='exposure'?'act':''}" onclick="S.resultTab='exposure';S.rightPanel='hide';R()">Asset Exposure</div>
+          <div class="result-tab ${S.resultTab==='wire'?'act':''}" onclick="S.resultTab='wire';R()">Wire Info</div>
         </div>
         ${S.resultTab==='wire'?rWireInfo(n):S.resultTab==='exposure'?rExposure(n):S.resultTab==='commitment'?rCommitment(n):`
         ${rDashboard(h,items)}
         ${rItems(items)}
         <div style="margin-top:12px">
           <div class="tabs">
-            <button class="tb ${S.activeTab!=='raw'?'act':''}" onclick="stab('validation')">Validation</button>
-            <button class="tb ${S.activeTab==='raw'?'act':''}" onclick="stab('raw')">Raw AI</button>
+            <button class="tb ${S.activeTab==='overview'?'act':''}" onclick="stab('overview')">Notice Overview</button>
+            <button class="tb ${S.activeTab==='validation'||(!S.activeTab)?'act':''}" onclick="stab('validation')">Validation 검증</button>
+            <button class="tb ${S.activeTab==='corrections'?'act':''}" onclick="stab('corrections')">AI 수정내역</button>
           </div>
-          ${S.activeTab==='raw'
-            ?`<pre style="background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--r);padding:10px;;font-size:11px;color:var(--t2);overflow:auto;white-space:pre-wrap;max-height:300px">${escH(n.rawAiResponse)}</pre>`
+          ${S.activeTab==='overview'?rNoticeOverview(n)
+            :S.activeTab==='corrections'?rCorrectionLog(n)
             :rValid(h,items)
           }
         </div>`}
+        ${lpAutoFillInfo}
+        ${_userRole!=='viewer'?`<div style="display:flex;justify-content:flex-end;gap:6px;margin-top:20px;padding-top:12px;border-top:1px solid var(--bdr)">
+          ${_userRole==='admin'?`<button style="padding:4px 10px;font-size:11px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;transition:all .15s" onclick="showOrgAssign('${n.id}')" onmouseover="this.style.borderColor='var(--blue)';this.style.color='var(--blue)'" onmouseout="this.style.borderColor='';this.style.color='var(--t3)'" title="기관 배정 (이동/복사)">🏢 기관 배정</button>`:''}
+          <button style="padding:4px 10px;font-size:11px;border:1px solid var(--bdr);border-radius:4px;background:var(--bg0);color:var(--t3);cursor:pointer;transition:all .15s" onclick="reparseNotice('${n.id}')" onmouseover="this.style.borderColor='var(--indigo)';this.style.color='var(--indigo)'" onmouseout="this.style.borderColor='';this.style.color='var(--t3)'" title="저장된 PDF로 AI 재파싱 (재업로드 불필요)">↻ 재파싱</button>
+          <button class="btn-danger" onclick="deleteNotice('${n.id}')">삭제</button>
+        </div>`:''}
       </div>
-
-      <!-- RIGHT PANEL -->
       ${S.rightPanel==='hide'?`<div class="rpanel-expand" onclick="S.rightPanel='pdf';R()" title="패널 열기">◀</div>`:`
       <div class="rpanel">
         <div class="seg-ctrl">
@@ -3160,6 +3164,94 @@ function rValid(h,items){
         </div>
       </div>
     </details>
+  </div>`;
+}
+
+/* ===== NOTICE OVERVIEW TAB: AI Summary + Comments ===== */
+function rNoticeOverview(n){
+  const ov=n.header._overview;
+  if(n.header._overviewLoading){
+    return`<div style="text-align:center;padding:40px;color:var(--t3)"><div class="spin-s" style="margin:0 auto"></div><div style="margin-top:8px;font-size:12px">Notice 요약 생성 중...</div></div>`;
+  }
+  if(!ov){
+    setTimeout(()=>loadNoticeOverview(n.id),100);
+    return`<div style="text-align:center;padding:40px;color:var(--t3)"><div class="spin-s" style="margin:0 auto"></div><div style="margin-top:8px;font-size:12px">Notice 요약 준비 중...</div></div>`;
+  }
+  return`<div class="sec">
+    <div class="sh"><div class="st">Summary</div></div>
+    <div style="padding:12px 16px;font-size:12px;line-height:1.8;color:var(--t1);white-space:pre-wrap">${escH(ov.summary)}</div>
+  </div>
+  <div class="sec" style="margin-top:16px">
+    <div class="sh"><div class="st">Comments to LP</div></div>
+    <div style="padding:12px 16px;font-size:12px;line-height:1.8;color:var(--t1);white-space:pre-wrap">${escH(ov.comments)}</div>
+  </div>`;
+}
+
+async function loadNoticeOverview(noticeId){
+  const n=S.notices.find(x=>x.id===noticeId);
+  if(!n||n.header._overview||n.header._overviewLoading) return;
+  n.header._overviewLoading=true;
+  R();
+  try{
+    const resp=await authFetch(`${API}/api/qa`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        notice_id:noticeId, messages:[],
+        question:`이 Notice에 대해 아래 두 항목을 JSON으로 답변해주세요.
+1. "summary": 본 Notice의 전반적인 내용을 3-4문장으로 요약 (펀드명, 유형, 금액, 주요 항목 포함). 한국어로 작성.
+2. "comments": 통상적인 Notice와 다른 점이 있다면 처리 시 유의사항을 2-3문장으로 작성. 특이점이 없으면 "특이사항 없음". 한국어로 작성.
+반드시 {"summary":"...","comments":"..."} JSON만 응답하세요.`
+      })
+    });
+    if(!resp.ok) throw new Error(`서버 오류: ${resp.status}`);
+    const data=await resp.json();
+    try{
+      const parsed=JSON.parse(data.answer.replace(/```json|```/g,'').trim());
+      n.header._overview={summary:parsed.summary||'',comments:parsed.comments||''};
+    }catch(e){
+      n.header._overview={summary:data.answer||'',comments:''};
+    }
+  }catch(e){
+    n.header._overview={summary:'요약 생성 실패: '+e.message,comments:''};
+  }
+  n.header._overviewLoading=false;
+  R();
+}
+
+/* ===== AI 수정내역 TAB: V1/V2 Correction Log ===== */
+function rCorrectionLog(n){
+  const log=n.header._correction_log||[];
+  if(!log.length){
+    return`<div class="sec"><div style="text-align:center;padding:30px;color:var(--t3);font-size:12px">V1/V2 검증을 통한 수정 내역이 없습니다.</div></div>`;
+  }
+  let rows=log.map(l=>{
+    const amtCols=l.amountFrom!=null
+      ?`<td class="amt" style="padding:6px 8px;font-size:11px;text-decoration:line-through;color:var(--t3)">${fA(l.amountFrom)}</td><td class="amt" style="padding:6px 8px;font-size:11px;font-weight:600">${fA(l.amountTo)}</td>`
+      :'<td colspan="2"></td>';
+    return`<tr>
+      <td style="padding:6px 8px;font-size:11px"><span class="tg ${l.type==='V1'?'tg-c':'tg-d'}" style="font-size:9px;padding:1px 5px">${l.type}</span></td>
+      <td style="padding:6px 8px;font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis" title="${escH(l.item)}">${escH(l.item)}</td>
+      <td style="padding:6px 8px;font-size:11px">${escH(l.field)}</td>
+      <td style="padding:6px 8px;font-size:11px;text-decoration:line-through;color:var(--t3)">${l.field==='Transaction_type'?l.from:(l.from?'Yes':'No')}</td>
+      <td style="padding:6px 8px;font-size:11px;font-weight:600">${l.field==='Transaction_type'?l.to:(l.to?'Yes':'No')}</td>
+      ${amtCols}
+    </tr>`;
+  }).join('');
+
+  return`<div class="sec">
+    <div class="sh"><div class="st">V1/V2 검증 수정 내역</div><span style="font-size:11px;color:var(--t3)">${log.length}건</span></div>
+    <div class="tw"><table class="it">
+      <thead><tr>
+        <th style="padding:6px 8px;font-size:10px">검증</th>
+        <th style="padding:6px 8px;font-size:10px">항목</th>
+        <th style="padding:6px 8px;font-size:10px">필드</th>
+        <th style="padding:6px 8px;font-size:10px">수정 전</th>
+        <th style="padding:6px 8px;font-size:10px">수정 후</th>
+        <th style="padding:6px 8px;font-size:10px">금액 전</th>
+        <th style="padding:6px 8px;font-size:10px">금액 후</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
   </div>`;
 }
 
@@ -4345,6 +4437,44 @@ async function loadAssetGroups(){
   }
 }
 
+/* 자동 자산 그룹화: 새 펀드 업로드 후 저장된 그룹이 없으면 자동 실행 */
+async function _autoRunAssetGroup(fundKey){
+  if(S._aeLoading||S._assetGroups[fundKey]) return;
+  const allRaw=new Set();
+  S.notices.filter(x=>!x.is_voided&&getFundKey(x.header)===fundKey)
+    .forEach(n=>realItems(n.lineItems||[]).forEach(it=>{if(it.item_name)allRaw.add(it.item_name);}));
+  const names=[...allRaw];
+  if(names.length<2) return;
+  console.log(`[AUTO GROUP] Running for ${fundKey} (${names.length} items)`);
+  S._aeLoading=fundKey;
+  try{
+    const resp=await authFetch(`${API}/api/asset-groups`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({fund_key:fundKey,asset_names:names,model:S.geminiModel})
+    });
+    if(!resp.ok) throw new Error(`${resp.status}`);
+    const reader=resp.body.getReader();
+    const decoder=new TextDecoder();
+    let buffer='';
+    while(true){
+      const{done,value}=await reader.read();
+      if(done) break;
+      buffer+=decoder.decode(value,{stream:true});
+      const lines=buffer.split('\n');
+      buffer=lines.pop()||'';
+      for(const line of lines){
+        if(!line.startsWith('data: ')) continue;
+        try{
+          const evt=JSON.parse(line.slice(6).trim());
+          if(evt.stage==='done'){S._assetGroups[fundKey]=evt.groups;S._aeLoading=null;return;}
+          if(evt.stage==='error') throw new Error(evt.detail);
+        }catch(e){continue;}
+      }
+    }
+  }catch(e){console.warn('[AUTO GROUP] Failed:',e.message);}
+  S._aeLoading=null;
+}
+
 /* Toggle wire field between AI value and text_map value */
 function toggleWireValue(noticeId, fieldKey, newValue){
   const n=S.notices.find(x=>x.id===noticeId);
@@ -4845,8 +4975,15 @@ function applyCorrection(){
 }
 
 function _applyCorrectionToNotice(n, c){
+  // 수정 로그 기록
+  if(!n.header._correction_log) n.header._correction_log=[];
   if(c.v1Fix && c.v1Fix!=='timeout'){
     c.v1Fix.forEach(f=>{
+      n.header._correction_log.push({
+        type:'V1', item:n.lineItems[f.origIdx]?.item_name||`#${f.origIdx+1}`,
+        field:'Transaction_type', from:f.oldType||n.lineItems[f.origIdx].Transaction_type, to:f.newType,
+        amountFrom:pN(n.lineItems[f.origIdx].LP_signed_amount), amountTo:f.newSigned
+      });
       n.lineItems[f.origIdx].Transaction_type=f.newType;
       n.lineItems[f.origIdx].LP_signed_amount=f.newSigned;
       n.lineItems[f.origIdx].LP_cashDirection=f.newType==='call'?'outflow':'inflow';
@@ -4854,12 +4991,20 @@ function _applyCorrectionToNotice(n, c){
     });
   }
   if(c.v2Fix && c.v2Fix!=='timeout'){
-    c.v2Fix.forEach(f=>{n.lineItems[f.origIdx].Commitment_affecting=f.newCA;});
+    c.v2Fix.forEach(f=>{
+      n.header._correction_log.push({
+        type:'V2', item:n.lineItems[f.origIdx]?.item_name||`#${f.origIdx+1}`,
+        field:'Commitment_affecting', from:n.lineItems[f.origIdx].Commitment_affecting, to:f.newCA
+      });
+      n.lineItems[f.origIdx].Commitment_affecting=f.newCA;
+    });
   }
   n._statusCache=null;n._statusCacheHash=null;
-  // Save to backend
+  // Save items + correction log to backend
   authFetch(`${API}/api/notices/${n.id}/items`,{method:'PUT',headers:{'Content-Type':'application/json'},
     body:JSON.stringify(n.lineItems)}).catch(e=>console.warn('Save failed:',e));
+  authFetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({_correction_log:n.header._correction_log})}).catch(()=>{});
 }
 
 /* Render correction diff popup */
@@ -5084,6 +5229,20 @@ function normalizeNames(header){
   if(lpFull && lpFull!=='N/A'){
     const lpShortCandidate=_extractLpBeneficiary(lpFull, header.LP_Name_short);
     header.LP_Name_short=regName(S.nameReg.lp, lpFull, lpShortCandidate);
+  }
+  // LP Code/Name 자동 채움: 한쪽만 있으면 다른 쪽에 복사
+  const _hasLpName=header.LP_Name_full&&header.LP_Name_full!=='N/A'&&header.LP_Name_full!=='Unknown LP';
+  const _hasLpCode=header.LP_code&&header.LP_code!=='N/A';
+  if(_hasLpName&&!_hasLpCode){
+    header.LP_code=header.LP_Name_full;
+    header._lp_auto_filled='code';
+  } else if(!_hasLpName&&_hasLpCode){
+    header.LP_Name_full=header.LP_code;
+    header.LP_Name_short=header.LP_code;
+    regName(S.nameReg.lp, header.LP_code, header.LP_code);
+    header._lp_auto_filled='name';
+  } else {
+    delete header._lp_auto_filled;
   }
 }
 
@@ -6275,9 +6434,12 @@ async function reparseNotice(id){
           reparseJob.tokens=evt.tokens;
           reparseJob.status='done';
           reparseJob.noticeId=id;
+          // Auto asset grouping after reparse
+          const _agFk3=getFundKey(header);
+          if(_agFk3&&!S._assetGroups[_agFk3]) setTimeout(()=>_autoRunAssetGroup(_agFk3),500);
           // Navigate to result
           S.activeNoticeId=id;
-          S.page='result'; S.activeTab='validation';
+          S.page='result'; S.activeTab='overview';
           R();
           return;
         }
@@ -6538,10 +6700,14 @@ async function uploadToBackend(job){
     job.tDone=Date.now();
     job.status='done';job.noticeId=noticeId;
 
+    // Auto asset grouping for new funds
+    const _agFk=getFundKey(header);
+    if(_agFk&&!S._assetGroups[_agFk]) setTimeout(()=>_autoRunAssetGroup(_agFk),500);
+
     const stillActive=S.jobs.filter(j=>j.status==='reading'||j.status==='pending'||j.status==='processing');
     if(!stillActive.length && S.page==='upload'){
       const doneInBatch=S.jobs.filter(j=>j.status==='done');
-      if(doneInBatch.length===1){S.activeNoticeId=noticeId;S.page='result';S.activeTab='validation';}
+      if(doneInBatch.length===1){S.activeNoticeId=noticeId;S.page='result';S.activeTab='overview';}
       else{S.page='portfolio';}
     }
     R();
@@ -6639,9 +6805,12 @@ async function resolveDuplicate(action){
               crossRefVoid(evt.notice_id, header);
               job.tApiDone=Date.now(); job.tDone=Date.now(); job.tokens=evt.tokens;
               job.status='done'; job.noticeId=evt.notice_id;
+              // Auto asset grouping
+              const _agFk2=getFundKey(header);
+              if(_agFk2&&!S._assetGroups[_agFk2]) setTimeout(()=>_autoRunAssetGroup(_agFk2),500);
               // Navigate
               const stillActive=S.jobs.filter(j=>j.status==='reading'||j.status==='pending'||j.status==='processing');
-              if(!stillActive.length){S.activeNoticeId=evt.notice_id;S.page='result';S.activeTab='validation';}
+              if(!stillActive.length){S.activeNoticeId=evt.notice_id;S.page='result';S.activeTab='overview';}
               R(); return;
             }
             else if(evt.stage==='error'){
@@ -6997,7 +7166,7 @@ async function _doMultiLpParse(job, codes){
           if(!stillActive.length){
             const doneInBatch=subJobs.filter(j=>j.status==='done');
             if(doneInBatch.length===1 && doneInBatch[0].noticeId){
-              S.activeNoticeId=doneInBatch[0].noticeId;S.page='result';S.activeTab='validation';
+              S.activeNoticeId=doneInBatch[0].noticeId;S.page='result';S.activeTab='overview';
             } else if(doneInBatch.length>1){
               S.page='portfolio';
             }
