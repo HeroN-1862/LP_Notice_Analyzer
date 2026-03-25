@@ -3715,7 +3715,6 @@ function rCommitment(n){
   let hasStagger=false;
   const pctVals=rows.filter(r=>r.pct!=null).map(r=>r.pct);
   const pctRange=pctVals.length>=2?Math.max(...pctVals)-Math.min(...pctVals):100;
-  const ultraDense=rows.length>=10&&pctRange<20; // 극밀집 모드
   rows.forEach((r,i)=>{
     if(i===0||r.pct==null){r._stagger=0;return;}
     let prevPct=null;
@@ -3726,8 +3725,8 @@ function rCommitment(n){
     } else { r._stagger=0; }
   });
 
-  // tick 라벨 영역 높이: 기본 40px, stagger 있으면 54px
-  const tickH=hasStagger?54:40;
+  // tick 라벨 영역 높이: 기본 32px (현재 notice만 2줄), stagger 있으면 46px
+  const tickH=hasStagger?46:32;
 
   // Tick marks with labels
   let ticksHtml='';
@@ -3740,10 +3739,10 @@ function rCommitment(n){
     const tipType=r.type==='Call'?'Call':r.type==='Distribution'?'Dist':'Adj';
     const tipAmt=r.caAmount!=null?fA(Math.abs(r.caAmount)):'';
     const stgCls=r._stagger?'cmit-tick-label-stagger':'';
-    // 극밀집: #번호만, 정상: #번호 + 소진율
-    const labelContent=ultraDense
-      ?`<div>#${r.idx}</div>`
-      :`<div>#${r.idx}</div><div>${r.pct.toFixed(1)}%</div>`;
+    // 소진율은 현재 선택된 notice에서만 표시
+    const labelContent=r.isCurrent
+      ?`<div>#${r.idx}</div><div>${r.pct.toFixed(1)}%</div>`
+      :`<div>#${r.idx}</div>`;
     ticksHtml+=`<div class="cmit-tick" style="left:${left}%;bottom:0;z-index:${r.isCurrent?2:1}" title="${tipType} #${r.idx}: ${r.pct.toFixed(1)}% (${r.date})">
       <div class="cmit-tick-label ${stgCls}" style="color:${r.isCurrent?col:'var(--t3)'};font-weight:${r.isCurrent?'700':'400'}">${labelContent}</div>
       <div style="width:0;height:0;border-left:${sz} solid transparent;border-right:${sz} solid transparent;border-top:${sz} solid ${col};margin:2px auto 0"></div>
@@ -3751,13 +3750,28 @@ function rCommitment(n){
   });
 
   // Dashed lines overlay (bar 관통 점선)
+  // Funded 영역(navy) 안에서도 점선이 보이도록 현재 notice는 흰색 점선 사용
   let dashHtml='';
   rows.forEach(r=>{
     if(r.pct==null) return;
     const left=Math.min(Math.max(r.pct,0),100);
-    const col=r.type==='Call'?'var(--indigo)':r.type==='Distribution'?'var(--emerald)':'var(--amber)';
-    dashHtml+=`<div style="position:absolute;left:${left}%;top:0;width:0;height:100%;border-left:1px dashed ${r.isCurrent?col:'var(--bdr2)'};opacity:${r.isCurrent?'0.7':'0.25'};transform:translateX(0px)"></div>`;
+    const inFunded=left<=barPct; // funded(navy) 영역 안에 있는지
+    if(r.isCurrent){
+      // 현재 notice: funded 영역 안이면 흰색 점선, 밖이면 type 색 점선
+      const dashCol=inFunded?'rgba(255,255,255,.85)':'var(--t1)';
+      dashHtml+=`<div style="position:absolute;left:${left}%;top:0;width:0;height:100%;border-left:2px dashed ${dashCol};opacity:0.9;transform:translateX(-1px)"></div>`;
+    } else {
+      // 비현재: funded 영역 안이면 반투명 흰색, 밖이면 연한 border 색
+      const dashCol=inFunded?'rgba(255,255,255,.3)':'var(--bdr2)';
+      dashHtml+=`<div style="position:absolute;left:${left}%;top:0;width:0;height:100%;border-left:1px dashed ${dashCol};opacity:${inFunded?'1':'0.25'};transform:translateX(0px)"></div>`;
+    }
   });
+
+  // 10% 단위 스케일 라벨
+  let scaleHtml='';
+  for(let p=10;p<=100;p+=10){
+    scaleHtml+=`<div style="position:absolute;left:${p}%;transform:translateX(-50%);font-size:9px;color:var(--t3);font-variant-numeric:tabular-nums;opacity:.6">${p}%</div>`;
+  }
 
   const secB=`<div class="sec" style="margin-bottom:16px">
     <div class="sh"><div class="st">소진 흐름</div></div>
@@ -3769,7 +3783,8 @@ function rCommitment(n){
         </div>
         <div style="position:absolute;top:0;left:0;right:0;height:28px;pointer-events:none">${dashHtml}</div>
       </div>
-      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;font-variant-numeric:tabular-nums">
+      <div style="position:relative;height:16px;margin-top:2px">${scaleHtml}</div>
+      <div style="display:flex;justify-content:space-between;margin-top:2px;font-size:11px;font-variant-numeric:tabular-nums">
         <span style="color:var(--indigo);font-weight:600">Funded: ${fA(latestFunded)} (${barPct.toFixed(1)}%)</span>
         <span style="color:var(--t3)">Unfunded: ${fA(latestUnf)} (${latestPct!=null?(100-latestPct).toFixed(1)+'%':''})</span>
       </div>
