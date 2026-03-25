@@ -282,19 +282,24 @@ def _make_fund_id_key(full_name: str) -> str:
 
 
 def _make_duplicate_key(header: dict) -> str:
-    """Generate a composite key from parsed header for duplicate detection."""
+    """Generate a composite key from parsed header for duplicate detection.
+    Includes Investment_Class to distinguish Class A / Class B / LP Interest notices
+    that share the same fund, LP, date, and net amount."""
     net = header.get("LP_net_amount")
     try:
         net_rounded = str(round(float(net or 0), 2))
     except (ValueError, TypeError):
         net_rounded = "0"
     fund_key = str(header.get("Fund_ID_Key", "") or header.get("Underlying_Fund_Name_full", "") or "").strip().lower()
+    # ★ Investment_Class 포함 — Class A/B/LP Interest 구분
+    inv_class = str(header.get("Investment_Class", "") or "LP Interest").strip().lower()
     parts = [
         str(header.get("issue_date", "") or "").strip(),
         str(header.get("LP_code", "") or "").strip().lower(),
         fund_key,
         net_rounded,
         str(header.get("notice_type", "") or "").strip().lower(),
+        inv_class,
     ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
@@ -2922,6 +2927,33 @@ async def health():
 
 def _count_notices():
     return db_count("notices")
+
+
+# ── Startup Migration: duplicate_key 재계산 (Investment_Class 추가) ──
+_DUP_KEY_VERSION = "v2_inv_class"  # 변경 시 재계산 트리거
+
+@app.on_event("startup")
+async def _migrate_duplicate_keys():
+    """Regenerate duplicate_key for all existing notices when formula changes.
+    Uses settings table to track migration version — runs once per version."""
+    try:
+        existing_ver = _get_setting("_dup_key_version")
+        if existing_ver == _DUP_KEY_VERSION:
+            return  # Already migrated
+        print(f"  [MIGRATE] Regenerating duplicate_key ({existing_ver} → {_DUP_KEY_VERSION})...")
+        rows = db_list("notices")
+        updated = 0
+        for r in rows:
+            header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
+            new_key = _make_duplicate_key(header)
+            old_key = r.get("duplicate_key", "")
+            if new_key != old_key:
+                db_update("notices", {"duplicate_key": new_key}, r["id"])
+                updated += 1
+        _set_setting("_dup_key_version", _DUP_KEY_VERSION)
+        print(f"  [MIGRATE] Done: {updated}/{len(rows)} notices updated")
+    except Exception as e:
+        print(f"  [MIGRATE] Error: {e}")
 
 
 # ── Excel Export (openpyxl) ────────────────────────────

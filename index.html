@@ -97,6 +97,9 @@ body{font-family:var(--f);background:var(--bg0);color:var(--t1);min-height:100vh
 .pg-h p{font-size:12px;color:var(--t2);margin-top:1px}
 .pg-b{padding:20px 24px 44px;flex:1}
 
+/* Supersedes popup — hover로 재표시 */
+.ss-wrap:hover .ss-popup{display:block!important}
+
 /* Toast */
 .toast{display:flex;align-items:center;gap:10px;padding:10px 14px;margin-bottom:14px;background:linear-gradient(135deg,rgba(45,127,249,.07),rgba(14,196,169,.05));border:1px solid rgba(45,127,249,.18);border-radius:var(--r);font-size:11px;animation:fi .3s ease}
 .spin-s{width:14px;height:14px;border:2px solid var(--bdr);border-top-color:var(--blue);border-radius:50%;animation:sp .8s linear infinite;flex-shrink:0}
@@ -609,6 +612,24 @@ function clearStorage(){
 }
 
 // Load on start — check auth first
+// ★ v10 PDF 캐시 Race Condition 수정 — 기존 오염된 IndexedDB 캐시 1회 정리
+// (IDB 상수/함수가 아래에서 정의되므로 자체 완결형으로 구현)
+(async function _idbFlushOnce(){
+  if(localStorage.getItem('_idbV10')) return;
+  try{
+    const db=await new Promise((res,rej)=>{
+      const r=indexedDB.open('lp_pdf_cache',1);
+      r.onupgradeneeded=()=>{const d=r.result;if(!d.objectStoreNames.contains('pdfs'))d.createObjectStore('pdfs',{keyPath:'id'});};
+      r.onsuccess=()=>res(r.result);
+      r.onerror=()=>rej(r.error);
+    });
+    const tx=db.transaction('pdfs','readwrite');
+    tx.objectStore('pdfs').clear();
+    console.log('[PDF] IndexedDB cache flushed (v10 race condition fix)');
+  }catch(e){}
+  localStorage.setItem('_idbV10','1');
+})();
+
 (async function startup() {
   const authed = await initAuth();
   if (authed) {
@@ -774,8 +795,11 @@ function renderSB(){
           const lpFull=_sbLpIsNA?(_sbLpRawFull||'Unknown LP'):_sbLpRawFull;
           const lpShort=_sbLpIsNA?(n.header.LP_code||_sbLpRawShort||'Unknown LP'):(_sbLpRawShort||_sbLpRawFull);
           const lpKey=n.header.LP_code||normalizeLpName(lpFull)||lpFull;
-          if(!fundGroups[fKey].lps[lpKey]) fundGroups[fKey].lps[lpKey]={lpFull,lpShort,lpCode:n.header.LP_code||'',notices:[]};
+          const cls=n.header.Investment_Class||'LP Interest';
+          if(!fundGroups[fKey].lps[lpKey]) fundGroups[fKey].lps[lpKey]={lpFull,lpShort,lpCode:n.header.LP_code||'',notices:[],classes:{}};
           fundGroups[fKey].lps[lpKey].notices.push(n);
+          if(!fundGroups[fKey].lps[lpKey].classes[cls]) fundGroups[fKey].lps[lpKey].classes[cls]=[];
+          fundGroups[fKey].lps[lpKey].classes[cls].push(n);
         });
 
         // Register short names for display
@@ -790,10 +814,38 @@ function renderSB(){
           return na.localeCompare(nb,undefined,{sensitivity:'base'});
         });
         window._sbFundKeys=sbSorted.map(e=>e[0]);
+        // ★ Notice 아이템 렌더 헬퍼 (LP/Class 서브그룹에서 공용)
+        const _sbNoticeItem=(n)=>{
+          const isPendingLp=!!n.header._pending_lp;
+          const due=isPendingLp?'LP 입력 대기':fmtDate(n.header.issue_date||n.header.due_date||'N/A');
+          const st=isPendingLp?'none':getNoticeStatus(n);
+          const statusDot=isPendingLp?'<span style="font-size:8px;font-weight:600;color:var(--amber);background:var(--amber-d);padding:0 4px;border-radius:2px;line-height:14px;flex-shrink:0">LP</span>'
+            :st==='pass'?''
+            :st==='fixable'?'<span style="width:7px;height:7px;border-radius:50%;background:var(--amber);display:inline-block;flex-shrink:0;animation:pulse 1.5s ease infinite"></span>'
+            :st==='fail'?'<span style="width:7px;height:7px;border-radius:50%;background:var(--red);display:inline-block;flex-shrink:0"></span>'
+            :'<span style="width:7px;height:7px;border-radius:50%;border:1.5px solid var(--t3);display:inline-block;flex-shrink:0"></span>';
+          const isSuperseding=n.header.voids_prior_notice&&n.header.voids_prior_notice!=='N/A'&&!n.is_voided;
+          const supersedeBadge=isSuperseding?'<span style="font-size:8px;font-weight:700;color:var(--amber);background:var(--amber-d);padding:0 3px;border-radius:2px;line-height:14px;flex-shrink:0" title="이 Notice는 이전 Notice를 대체(Amend)합니다">Amd</span>':'';
+          return`<div class="sb-notice ${S.page==='result'&&S.activeNoticeId===n.id?'act':''} ${n.is_voided?'voided':''}" onclick="viewNotice('${n.id}'${st==='fixable'?',true':''})">
+            <span class="n-icon">${nIcon(n)}</span>
+            <span class="n-text" style="${n.is_voided?'text-decoration:line-through;opacity:.5':''}${isPendingLp?'color:var(--amber);font-style:italic':''}">${due}</span>
+            ${supersedeBadge}${statusDot}
+          </div>`;
+        };
+        const _sbSortNotices=(arr)=>arr.slice().sort((a,b)=>{
+          const da=fmtDate(a.header.issue_date||a.header.due_date||'');
+          const db=fmtDate(b.header.issue_date||b.header.due_date||'');
+          return da.localeCompare(db);
+        });
         return sbSorted.map(([fKey,fg],fi)=>{
           const isOpen=S.sbOpen[fKey]!==false;
           const dispName=S.nameReg.fund[fg.fFull]||fg.fShort;
-          const lpEntries=Object.entries(fg.lps);
+          // ★ LP 정렬: A-Z
+          const lpEntries=Object.entries(fg.lps).sort((a,b)=>{
+            const na=S.nameReg.lp[a[1].lpFull]||a[1].lpShort;
+            const nb=S.nameReg.lp[b[1].lpFull]||b[1].lpShort;
+            return na.localeCompare(nb,undefined,{sensitivity:'base'});
+          });
           const multiLp=lpEntries.length>1;
 
           return`<div class="sb-fund">
@@ -809,30 +861,27 @@ function renderSB(){
                 const lpLabel=(!_sbLpNA2&&lp.lpCode)?lpDispName+' · '+lp.lpCode:lpDispName;
                 const lpOpenKey=fKey+'__'+lpKey;
                 const isLpOpen=S.sbLpOpen[lpOpenKey]!==false;
-                const sorted=lp.notices.slice().sort((a,b)=>{
-                  const da=fmtDate(a.header.issue_date||a.header.due_date||'');
-                  const db=fmtDate(b.header.issue_date||b.header.due_date||'');
-                  return da.localeCompare(db);
-                });
+                const classKeys=Object.keys(lp.classes||{});
+                const multiClass=classKeys.length>1;
                 const lpHeader=multiLp?`<div style="padding:3px 10px 2px 20px;font-size:11px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px;cursor:pointer;display:flex;align-items:center;gap:4px" onclick="event.stopPropagation();toggleSbLp('${escH(lpOpenKey)}')" title="${escH(lp.lpFull)}"><span style="font-size:8px;transition:transform .15s;transform:rotate(${isLpOpen?'90':'0'}deg);flex-shrink:0;color:var(--t3)">▶</span><span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:var(--slate-d);color:var(--slate);font-size:8px;font-weight:700;text-align:center;line-height:12px;flex-shrink:0">LP</span><span style="overflow:hidden;text-overflow:ellipsis;flex:1">${escH(lpLabel)}</span><span style="font-size:10px;color:var(--t3);flex-shrink:0">${lp.notices.length}</span></div>`:'';
-                return`${lpHeader}
-                ${!multiLp||isLpOpen?sorted.map(n=>{
-                  const isPendingLp=!!n.header._pending_lp;
-                  const due=isPendingLp?'LP 입력 대기':fmtDate(n.header.issue_date||n.header.due_date||'N/A');
-                  const st=isPendingLp?'none':getNoticeStatus(n);
-                  const statusDot=isPendingLp?'<span style="font-size:8px;font-weight:600;color:var(--amber);background:var(--amber-d);padding:0 4px;border-radius:2px;line-height:14px;flex-shrink:0">LP</span>'
-                    :st==='pass'?''
-                    :st==='fixable'?'<span style="width:7px;height:7px;border-radius:50%;background:var(--amber);display:inline-block;flex-shrink:0;animation:pulse 1.5s ease infinite"></span>'
-                    :st==='fail'?'<span style="width:7px;height:7px;border-radius:50%;background:var(--red);display:inline-block;flex-shrink:0"></span>'
-                    :'<span style="width:7px;height:7px;border-radius:50%;border:1.5px solid var(--t3);display:inline-block;flex-shrink:0"></span>';
-                  const isSuperseding=n.header.voids_prior_notice&&n.header.voids_prior_notice!=='N/A'&&!n.is_voided;
-                  const supersedeBadge=isSuperseding?'<span style="font-size:8px;font-weight:700;color:var(--amber);background:var(--amber-d);padding:0 3px;border-radius:2px;line-height:14px;flex-shrink:0" title="이 Notice는 이전 Notice를 대체(Amend)합니다">Amd</span>':'';
-                  return`<div class="sb-notice ${S.page==='result'&&S.activeNoticeId===n.id?'act':''} ${n.is_voided?'voided':''}" onclick="viewNotice('${n.id}'${st==='fixable'?',true':''})">
-                    <span class="n-icon">${nIcon(n)}</span>
-                    <span class="n-text" style="${n.is_voided?'text-decoration:line-through;opacity:.5':''}${isPendingLp?'color:var(--amber);font-style:italic':''}">${due}</span>
-                    ${supersedeBadge}${statusDot}
-                  </div>`;
-                }).join(''):''}`;
+                // ★ Class 서브그룹 렌더링
+                const noticeContent=(()=>{
+                  if(!multiLp&&!isLpOpen) return '';
+                  if(multiLp&&!isLpOpen) return '';
+                  if(!multiClass){
+                    return _sbSortNotices(lp.notices).map(n=>_sbNoticeItem(n)).join('');
+                  }
+                  // 다중 Class: Class별 서브헤더 표시
+                  return classKeys.sort().map(cls=>{
+                    const clsNotices=lp.classes[cls];
+                    const clsOpenKey=lpOpenKey+'__'+cls;
+                    const isClsOpen=S.sbLpOpen[clsOpenKey]!==false;
+                    const clsLabel=cls||'LP Interest';
+                    const indent=multiLp?34:20;
+                    return`<div style="padding:2px 10px 1px ${indent}px;font-size:10px;color:var(--purple);cursor:pointer;display:flex;align-items:center;gap:3px;margin-top:1px" onclick="event.stopPropagation();toggleSbLp('${escH(clsOpenKey)}')" title="${escH(clsLabel)}"><span style="font-size:7px;transition:transform .15s;transform:rotate(${isClsOpen?'90':'0'}deg);flex-shrink:0">▶</span><span style="overflow:hidden;text-overflow:ellipsis;flex:1;font-weight:600">${escH(clsLabel)}</span><span style="font-size:9px;color:var(--t3);flex-shrink:0">${clsNotices.length}</span></div>${isClsOpen?_sbSortNotices(clsNotices).map(n=>_sbNoticeItem(n)).join(''):''}`;
+                  }).join('');
+                })();
+                return`${lpHeader}${noticeContent}`;
               }).join('')}
             </div>`:''}
           </div>`;
@@ -1818,6 +1867,7 @@ function pgPortfolio(){
             window._fundLpInfo[fi]=[];
             return fund.lps.map((lp,li)=>{
             const lpNotices=[];lp.classes.forEach(c=>c.notices.forEach(n=>lpNotices.push(n)));
+            const multiClass=lp.classes.length>1;
             const commit=lpNotices.reduce((v,n)=>pN(n.header.Commitment_original)||v,null);
             const unfunded=lpNotices.reduce((v,n)=>pN(n.header.Unfunded_after)||v,null);
             const pctUsed=commit&&unfunded?Math.round((1-unfunded/commit)*100):null;
@@ -1828,38 +1878,55 @@ function pgPortfolio(){
               lpNameFull:lpNotices[0]?.header.LP_Name_full||'',
               lpNameShort:lpNotices[0]?.header.LP_Name_short||''
             });
+            // ★ Notice 칩 렌더 헬퍼
+            const _pfChip=(n,ni,chiCls)=>{
+              const tp=n.header.notice_type;
+              const d=fmtDate(n.header.issue_date||n.header.due_date||'');
+              const shortD=d&&d!=='N/A'?d.substring(5):'?';
+              const isSuperseding=n.header.voids_prior_notice&&n.header.voids_prior_notice!=='N/A'&&!n.is_voided;
+              const pre=isSuperseding?'A':tp==='Call'?'C':tp==='Distribution'?'D':'A';
+              const bg=n.is_voided?'rgba(120,120,120,.1)':isSuperseding?'var(--amber-d)':tp==='Call'?'var(--indigo-d)':tp==='Distribution'?'var(--emerald-d)':'var(--amber-d)';
+              const col=n.is_voided?'#777':isSuperseding?'var(--amber)':tp==='Call'?'var(--indigo)':tp==='Distribution'?'var(--emerald)':'var(--amber)';
+              const amdMark=isSuperseding?'↻':'';
+              return`<div ${fi===0&&li===0&&ni===0?'id="pfNotice0" ':''}onclick="viewNotice('${n.id}')" draggable="true"
+                ondragstart="handleNoticeDragStart(event,'${n.id}')" ondragend="handleNoticeDragEnd(event)"
+                style="padding:3px 8px;border-radius:4px;font-size:11px;background:${bg};color:${col};cursor:pointer;white-space:nowrap;${n.is_voided?'text-decoration:line-through;opacity:.5':''}"
+                title="${escH(n.header.notice_title||'')}  ${d}${isSuperseding?' (Amended)':''}">${amdMark}${pre}#${ni+1} ${shortD}</div>`;
+            };
+            const _pfSortN=(arr)=>arr.slice().sort((a,b)=>(fmtDate(a.header.issue_date||'')||'').localeCompare(fmtDate(b.header.issue_date||'')||''));
+
             return`<div id="pfLp${fi}_${li}" style="padding:12px 16px;border-top:1px solid var(--bdr);transition:background .15s"
               ondragover="if(!_isFundDrag){event.preventDefault();this.style.background='rgba(45,127,249,.06)';this.style.outline='2px dashed var(--blue)';this.style.outlineOffset='-2px'}"
               ondragleave="this.style.background='';this.style.outline=''"
               ondrop="this.style.background='';this.style.outline='';handleNoticeDropOnLp(event,${fi},${li})">
               <div style="font-size:12px;font-weight:600;color:var(--t1)">${escH(lp.displayName)} ${lpCode?'· '+lpCode:''}
                 ${(_userRole==='admin'||_userRole==='uploader')?` <span onclick="event.stopPropagation();editLpInfo(${fi},${li})" style="cursor:pointer;font-size:10px;color:var(--t3);opacity:.5;padding:1px 6px;border-radius:3px;border:1px solid var(--bdr);background:var(--bg0)" onmouseover="this.style.opacity='1';this.style.color='var(--t1)'" onmouseout="this.style.opacity='.5';this.style.color='var(--t3)'" title="LP 정보 수정">LP 수정</span>`:''}</div>
+              ${!multiClass?`
               <div style="display:flex;align-items:center;gap:12px;margin-top:6px;font-size:11px;color:var(--t2)">
                 ${commit?`<span>Commit: <b style="color:var(--t1)">${fA(commit)}</b></span>`:''}
                 ${pctUsed!==null?`<div style="width:60px;height:6px;background:var(--bdr);border-radius:3px;overflow:hidden"><div style="height:100%;width:${pctUsed}%;background:var(--teal);border-radius:3px"></div></div><span>${pctUsed}%</span>`:''}
                 ${unfunded?`<span>Rem: <span style="color:var(--t3)">${fA(unfunded)}</span></span>`:''}
               </div>
-              <!-- Notice chips -->
               <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">
-                ${lpNotices.slice().sort((a,b)=>{
-                  const da=fmtDate(a.header.issue_date||a.header.due_date||'');
-                  const db=fmtDate(b.header.issue_date||b.header.due_date||'');
-                  return da.localeCompare(db);
-                }).map((n,ni)=>{
-                  const tp=n.header.notice_type;
-                  const d=fmtDate(n.header.issue_date||n.header.due_date||'');
-                  const shortD=d&&d!=='N/A'?d.substring(5):'?';
-                  const isSuperseding=n.header.voids_prior_notice&&n.header.voids_prior_notice!=='N/A'&&!n.is_voided;
-                  const pre=isSuperseding?'A':tp==='Call'?'C':tp==='Distribution'?'D':'A';
-                  const bg=n.is_voided?'rgba(120,120,120,.1)':isSuperseding?'var(--amber-d)':tp==='Call'?'var(--indigo-d)':tp==='Distribution'?'var(--emerald-d)':'var(--amber-d)';
-                  const col=n.is_voided?'#777':isSuperseding?'var(--amber)':tp==='Call'?'var(--indigo)':tp==='Distribution'?'var(--emerald)':'var(--amber)';
-                  const amdMark=isSuperseding?'↻':'';
-                  return`<div ${fi===0&&li===0&&ni===0?'id="pfNotice0" ':''}onclick="viewNotice('${n.id}')" draggable="true"
-                    ondragstart="handleNoticeDragStart(event,'${n.id}')" ondragend="handleNoticeDragEnd(event)"
-                    style="padding:3px 8px;border-radius:4px;font-size:11px;;background:${bg};color:${col};cursor:pointer;white-space:nowrap;${n.is_voided?'text-decoration:line-through;opacity:.5':''}"
-                    title="${escH(n.header.notice_title||'')}  ${d}${isSuperseding?' (Amended)':''}">${amdMark}${pre}#${ni+1} ${shortD}</div>`;
-                }).join('')}
-              </div>
+                ${_pfSortN(lpNotices).map((n,ni)=>_pfChip(n,ni)).join('')}
+              </div>`
+              :lp.classes.sort((a,b)=>a.name.localeCompare(b.name)).map(cls=>{
+                const clsNotices=cls.notices;
+                const clsCommit=clsNotices.reduce((v,n)=>pN(n.header.Commitment_original)||v,null);
+                const clsUnfunded=clsNotices.reduce((v,n)=>pN(n.header.Unfunded_after)||v,null);
+                const clsPct=clsCommit&&clsUnfunded?Math.round((1-clsUnfunded/clsCommit)*100):null;
+                return`<div style="margin-top:8px;padding:6px 10px;background:var(--bg3);border-radius:var(--r);border:1px solid var(--bdr)">
+                  <div style="font-size:11px;font-weight:600;color:var(--purple);margin-bottom:4px">${escH(cls.name)}</div>
+                  <div style="display:flex;align-items:center;gap:12px;font-size:11px;color:var(--t2)">
+                    ${clsCommit?`<span>Commit: <b style="color:var(--t1)">${fA(clsCommit)}</b></span>`:''}
+                    ${clsPct!==null?`<div style="width:60px;height:6px;background:var(--bdr);border-radius:3px;overflow:hidden"><div style="height:100%;width:${clsPct}%;background:var(--teal);border-radius:3px"></div></div><span>${clsPct}%</span>`:''}
+                    ${clsUnfunded?`<span>Rem: <span style="color:var(--t3)">${fA(clsUnfunded)}</span></span>`:''}
+                  </div>
+                  <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">
+                    ${_pfSortN(clsNotices).map((n,ni)=>_pfChip(n,ni,cls.name)).join('')}
+                  </div>
+                </div>`;
+              }).join('')}
             </div>`;
           }).join('')
           })()}
@@ -2063,6 +2130,7 @@ function buildTree(){
   });
   return Object.values(funds).map(f=>({
     ...f,lps:Object.values(f.lps).map(lp=>({...lp,classes:Object.values(lp.classes)}))
+      .sort((a,b)=>a.displayName.localeCompare(b.displayName,undefined,{sensitivity:'base'}))
   })).sort((a,b)=>a.displayName.localeCompare(b.displayName));
 }
 
@@ -2365,16 +2433,18 @@ function renderResultPG(hEl,bEl){
   const h=n.header,items=n.lineItems||[];
   const tt=h.notice_type==='Call'?'tg-c':h.notice_type==='Distribution'?'tg-d':'tg-a';
   const voidedTag=n.is_voided?'<span class="tg" style="background:rgba(120,120,120,.1);color:#999;margin-left:6px">VOIDED</span>':'';
-  const voidsInfo=h.voids_prior_notice&&h.voids_prior_notice!=='N/A'?`<span style="color:var(--amber);font-size:11px">⚠️ Supersedes: ${escH(h.voids_prior_notice)}${h.voids_prior_date&&h.voids_prior_date!=='N/A'?' ('+h.voids_prior_date+')':''}</span>`:'';
+  const voidsInfo=h.voids_prior_notice&&h.voids_prior_notice!=='N/A';
+  const voidsText=voidsInfo?`Supersedes: ${escH(h.voids_prior_notice)}${h.voids_prior_date&&h.voids_prior_date!=='N/A'?' ('+h.voids_prior_date+')':''}`:'';
+  // ★ Supersedes 아이콘: 클릭→팝업 표시/닫기, hover→재표시
+  const voidsBadge=voidsInfo?`<span class="ss-wrap" style="position:relative;flex-shrink:0;display:inline-flex" onmouseleave="this.querySelector('.ss-popup').style.display='none'"><span class="ss-icon" onclick="event.stopPropagation();const p=this.nextElementSibling;p.style.display=p.style.display==='none'?'block':'none'" style="cursor:pointer;font-size:13px;padding:2px 6px;border-radius:10px;background:var(--amber-d);color:var(--amber);font-weight:600;line-height:1;display:inline-flex;align-items:center;gap:3px" title="${escH(voidsText)}">⚠️ Amd</span><div class="ss-popup" style="display:none;position:absolute;top:calc(100% + 6px);left:0;z-index:99;min-width:280px;max-width:400px;background:var(--bg1);border:1px solid var(--amber);border-radius:var(--r);padding:10px 12px;box-shadow:0 4px 16px rgba(0,0,0,.12);font-size:12px;color:var(--t1);line-height:1.5;white-space:normal"><div style="display:flex;justify-content:space-between;align-items:start;gap:8px"><div style="color:var(--amber);font-weight:600">⚠️ ${escH(voidsText)}</div><span onclick="event.stopPropagation();this.parentElement.parentElement.style.display='none'" style="cursor:pointer;color:var(--t3);font-size:14px;line-height:1;flex-shrink:0;padding:0 2px" title="닫기">✕</span></div></div></span>`:'';
   const noticeNum=(h.notice_number&&h.notice_number!=='N/A')?h.notice_number:'';
   const fundFullDisplay=h.Underlying_Fund_Name_full&&h.Underlying_Fund_Name_full!=='N/A'?h.Underlying_Fund_Name_full:'';
   hEl.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;width:100%;gap:16px">
-    <div style="flex-shrink:0"><div style="display:flex;align-items:center;gap:7px"><h1 style="${n.is_voided?'text-decoration:line-through;opacity:.5':''}">${h.notice_title||'Notice'}</h1><span class="tg ${tt}" style="border-radius:10px;padding:2px 10px">${h.notice_type||'N/A'}</span>${voidedTag}</div>
-      ${fundFullDisplay?`<div style="font-size:12px;color:var(--t1);margin-top:2px;font-weight:500">${escH(fundFullDisplay)}</div>`:''}
-      ${voidsInfo?`<div style="margin-top:3px">${voidsInfo}</div>`:''}
+    <div style="min-width:0;flex:1"><div style="display:flex;align-items:center;gap:7px;min-width:0"><h1 style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;${n.is_voided?'text-decoration:line-through;opacity:.5':''}" title="${escH(h.notice_title||'Notice')}">${h.notice_title||'Notice'}</h1><span class="tg ${tt}" style="border-radius:10px;padding:2px 10px;flex-shrink:0">${h.notice_type||'N/A'}</span>${voidedTag}${voidsBadge}</div>
+      ${fundFullDisplay?`<div style="font-size:12px;color:var(--t1);margin-top:2px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escH(fundFullDisplay)}">${escH(fundFullDisplay)}</div>`:''}
     </div>
-    <div style="flex:1;text-align:right;font-size:11px;color:var(--t2);line-height:1.7;min-width:0">
-      <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">LP: ${escH(h.LP_Name_full||h.LP_Name_short||'N/A')}${h.LP_code&&h.LP_code!=='N/A'?' · '+escH(h.LP_code):''}</div>
+    <div style="flex-shrink:0;text-align:right;font-size:11px;color:var(--t2);line-height:1.7;max-width:40%">
+      <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escH(h.LP_Name_full||h.LP_Name_short||'N/A')}${h.LP_code&&h.LP_code!=='N/A'?' · '+h.LP_code:''}">LP: ${escH(h.LP_Name_full||h.LP_Name_short||'N/A')}${h.LP_code&&h.LP_code!=='N/A'?' · '+escH(h.LP_code):''}</div>
       <div style="color:var(--t1)">Issue: ${fmtDate(h.issue_date)||'N/A'} · Due: ${fmtDate(h.due_date)||'N/A'}</div>
     </div>
     <div style="display:flex;gap:6px;flex-shrink:0">
@@ -2712,7 +2782,10 @@ async function _fetchPdfBytes(noticeId){
 }
 
 async function pdfRenderPage(pageNum){
-  if(!_pdfNoticeId) return;
+  // ★ Race condition 방지: 시작 시점의 noticeId를 캡처하여 async 전체에서 사용
+  // 사용자가 Notice를 빠르게 전환하면 _pdfNoticeId가 await 도중 바뀔 수 있음
+  const targetId = _pdfNoticeId;
+  if(!targetId) return;
   const canvas = document.getElementById('pdfCanvas');
   const loading = document.getElementById('pdfLoading');
 
@@ -2725,28 +2798,34 @@ async function pdfRenderPage(pageNum){
 
   try{
     await window._pdfjsReady;
+    if(_pdfNoticeId !== targetId) return; // ★ stale 체크: Notice 전환됨
 
     // Check LRU cache first (1차: 메모리)
-    const cached=_pdfCacheGet(_pdfNoticeId);
+    const cached=_pdfCacheGet(targetId);
     if(cached){
       _pdfDoc=cached;
       _pdfPageCount=_pdfDoc.numPages;
     } else {
       // 2차: IndexedDB (디스크 영구 캐시)
-      let buf=await _idbGet(_pdfNoticeId);
+      let buf=await _idbGet(targetId);
+      if(_pdfNoticeId !== targetId) return; // ★ stale 체크
       if(!buf){
         // 3차: 네트워크 (Signed URL + fallback)
-        buf=await _fetchPdfBytes(_pdfNoticeId);
-        _idbSet(_pdfNoticeId, buf); // fire-and-forget 저장
+        buf=await _fetchPdfBytes(targetId);
+        if(_pdfNoticeId !== targetId) return; // ★ stale 체크
+        _idbSet(targetId, buf); // fire-and-forget 저장
       }
       _pdfDoc = await pdfjsLib.getDocument({data: buf}).promise;
-      _pdfDoc._noticeId = _pdfNoticeId;
+      if(_pdfNoticeId !== targetId) return; // ★ stale 체크
+      _pdfDoc._noticeId = targetId;
       _pdfPageCount = _pdfDoc.numPages;
       // Store in memory cache
-      _pdfCacheSet(_pdfNoticeId, _pdfDoc);
+      _pdfCacheSet(targetId, _pdfDoc);
     }
 
+    if(_pdfNoticeId !== targetId) return; // ★ 렌더 직전 최종 체크
     const page = await _pdfDoc.getPage(pageNum);
+    if(_pdfNoticeId !== targetId) return; // ★ getPage도 async
     if(!canvas) return;
 
     // Calculate scale: fit canvas to container width
@@ -2763,17 +2842,19 @@ async function pdfRenderPage(pageNum){
 
     const ctx = canvas.getContext('2d');
     await page.render({canvasContext: ctx, viewport}).promise;
+    if(_pdfNoticeId !== targetId) return; // ★ 렌더 완료 후에도 체크
 
     // Render complete — reveal canvas, hide overlay
     if(loading) loading.style.display='none';
     canvas.style.opacity='1';
   }catch(e){
+    if(_pdfNoticeId !== targetId) return; // ★ 에러 UI도 stale이면 무시
     console.error('PDF.js render error:', e);
     if(loading){
       const isTimeout=e.name==='AbortError'||e.message.includes('abort');
       const msg=isTimeout?'서버 응답 시간 초과':'PDF 로드 실패';
       loading.innerHTML=`<span style="color:var(--red);font-size:12px">${msg}</span>
-        <button class="btn btn-sm btn-s" onclick="_pdfDoc=null;_pdfCache.delete('${_pdfNoticeId}');pdfRenderPage(${_pdfPage})" style="margin-top:8px;font-size:11px">↻ 다시 시도</button>`;
+        <button class="btn btn-sm btn-s" onclick="_pdfDoc=null;_pdfCache.delete('${targetId}');pdfRenderPage(${_pdfPage})" style="margin-top:8px;font-size:11px">↻ 다시 시도</button>`;
     }
   }
 }
