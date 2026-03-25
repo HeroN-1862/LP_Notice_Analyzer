@@ -2924,6 +2924,687 @@ def _count_notices():
     return db_count("notices")
 
 
+# ── Excel Export (openpyxl) ────────────────────────────
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
+from openpyxl.utils import get_column_letter
+from datetime import datetime, date as dt_date
+
+# Style constants
+_XS_NAVY = 'FF1D3557'
+_XS_NAVY_LIGHT = 'FFE8EDF3'
+_XS_GREEN = 'FF4E9A6D'
+_XS_AMBER = 'FFD97706'
+_XS_GRAY = 'FFF5F6F8'
+_XS_BDR = 'FFE2E8F0'
+_XS_WHITE = 'FFFFFFFF'
+
+_FNT_TITLE = Font(name='Calibri', size=14, bold=True, color=_XS_WHITE)
+_FNT_SEC = Font(name='Calibri', size=10, bold=True, color=_XS_NAVY)
+_FNT_HDR = Font(name='Calibri', size=9, bold=True, color='FF6B7280')
+_FNT_BOLD = Font(name='Calibri', size=10, bold=True)
+_FNT_NORM = Font(name='Calibri', size=10)
+_FNT_SMALL = Font(name='Calibri', size=9, color='FF6B7280')
+
+_FILL_NAVY = PatternFill('solid', fgColor=_XS_NAVY)
+_FILL_LIGHT = PatternFill('solid', fgColor=_XS_NAVY_LIGHT)
+_FILL_GRAY = PatternFill('solid', fgColor=_XS_GRAY)
+_FILL_CUR = PatternFill('solid', fgColor='FFDBEAFE')  # 현재 notice 하이라이트
+
+_ALIGN_R = Alignment(horizontal='right', vertical='center')
+_ALIGN_L = Alignment(horizontal='left', vertical='center')
+_ALIGN_C = Alignment(horizontal='center', vertical='center')
+
+_BDR_THIN = Border(bottom=Side('thin', color=_XS_BDR))
+_BDR_MED = Border(bottom=Side('medium', color=_XS_NAVY))
+_BDR_TOP_DBL = Border(top=Side('double', color='FF000000'))
+
+_NUM = '#,##0.00'
+_NUM_ACCT = '#,##0.00_);(#,##0.00)'
+_PCT = '0.0%'
+_DATE = 'YYYY-MM-DD'
+
+
+def _xs_date(s):
+    """Parse date string to datetime.date for Excel."""
+    if not s or s == 'N/A':
+        return None
+    try:
+        return datetime.strptime(s[:10], '%Y-%m-%d').date()
+    except:
+        return s
+
+
+def _xs_set_row(ws, row, data, styles=None):
+    """Write a row of data with optional per-cell styles."""
+    for ci, val in enumerate(data, 1):
+        cell = ws.cell(row=row, column=ci, value=val)
+        if styles:
+            s = styles[ci - 1] if ci - 1 < len(styles) else None
+            if s:
+                if 'font' in s: cell.font = s['font']
+                if 'fill' in s: cell.fill = s['fill']
+                if 'align' in s: cell.alignment = s['align']
+                if 'fmt' in s: cell.number_format = s['fmt']
+                if 'border' in s: cell.border = s['border']
+
+
+def _xs_style_header_row(ws, row, max_col):
+    """Apply header style to a row."""
+    for c in range(1, max_col + 1):
+        cell = ws.cell(row=row, column=c)
+        cell.font = _FNT_HDR
+        cell.fill = _FILL_LIGHT
+        cell.border = _BDR_MED
+        if c >= 4:  # numeric columns
+            cell.alignment = _ALIGN_R
+
+
+def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
+    """Build a single Notice sheet with formatting and formulas."""
+    ws = wb.create_sheet(sheet_name)
+    h = notice['header']
+    items = [it for it in notice.get('line_items', []) if not it.get('is_subtotal')]
+
+    # Title row (merged)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=5)
+    title_cell = ws.cell(row=1, column=1,
+        value=f"{h.get('Underlying_Fund_Name_full', '')} — {h.get('notice_type', '')} Notice")
+    title_cell.font = _FNT_TITLE
+    title_cell.fill = _FILL_NAVY
+    title_cell.alignment = _ALIGN_L
+    for c in range(2, 6):
+        ws.cell(row=1, column=c).fill = _FILL_NAVY
+    ws.row_dimensions[1].height = 30
+
+    # Header info
+    r = 3
+    info_fields = [
+        ('Fund Name', h.get('Underlying_Fund_Name_full', '')),
+        ('Notice Title', h.get('notice_title', '')),
+        ('Notice Number', h.get('notice_number', '')),
+        ('Issue Date', _xs_date(h.get('issue_date', ''))),
+        ('Due Date', _xs_date(h.get('due_date', ''))),
+        ('LP Name', h.get('LP_Name_full', '')),
+        ('LP Code', h.get('LP_code', '')),
+        ('Commitment', _pn(h.get('Commitment_original'))),
+        ('LP Interest %', (_pn(h.get('pct_LP_Interest')) or 0) / 100 if _pn(h.get('pct_LP_Interest')) else None),
+    ]
+    for label, val in info_fields:
+        ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
+        ws.cell(row=r, column=1).fill = _FILL_GRAY
+        cell = ws.cell(row=r, column=2, value=val)
+        cell.font = _FNT_NORM
+        if isinstance(val, (int, float)) and val and label == 'Commitment':
+            cell.number_format = _NUM
+        elif label == 'LP Interest %' and val is not None:
+            cell.number_format = _PCT
+        elif isinstance(val, dt_date):
+            cell.number_format = _DATE
+        r += 1
+
+    # Section: Prior
+    r += 1
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+    ws.cell(row=r, column=1, value='Prior to Current Notice').font = _FNT_SEC
+    ws.cell(row=r, column=1).fill = _FILL_LIGHT
+    for c in range(2, 6):
+        ws.cell(row=r, column=c).fill = _FILL_LIGHT
+    r += 1
+    for label, key in [('Unfunded Commitment', 'Unfunded_prior'), ('Cumul. Contributions', 'CumContribPrior'), ('Cumul. Distributions', 'CumDistribPrior')]:
+        ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
+        ws.cell(row=r, column=1).fill = _FILL_GRAY
+        cell = ws.cell(row=r, column=2, value=_pn(h.get(key)))
+        cell.number_format = _NUM_ACCT
+        r += 1
+
+    # Section: Current
+    r += 1
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+    ws.cell(row=r, column=1, value='Current Notice').font = _FNT_SEC
+    ws.cell(row=r, column=1).fill = _FILL_LIGHT
+    for c in range(2, 6):
+        ws.cell(row=r, column=c).fill = _FILL_LIGHT
+    r += 1
+    for label, key in [('Current Contributions', 'Current_Commit_Contribution'), ('Current Distributions', 'Current_Commit_Distribution'), ('LP Net Amount', 'LP_net_amount')]:
+        ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
+        ws.cell(row=r, column=1).fill = _FILL_GRAY
+        cell = ws.cell(row=r, column=2, value=_pn(h.get(key)))
+        cell.number_format = _NUM_ACCT
+        if label == 'LP Net Amount':
+            cell.font = _FNT_BOLD
+        r += 1
+
+    # Section: After
+    r += 1
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+    ws.cell(row=r, column=1, value='After Current Notice').font = _FNT_SEC
+    ws.cell(row=r, column=1).fill = _FILL_LIGHT
+    for c in range(2, 6):
+        ws.cell(row=r, column=c).fill = _FILL_LIGHT
+    r += 1
+    for label, key in [('Unfunded Commitment', 'Unfunded_after'), ('Cumul. Contributions', 'CumContribAfter'), ('Cumul. Distributions', 'CumDistribAfter')]:
+        ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
+        ws.cell(row=r, column=1).fill = _FILL_GRAY
+        cell = ws.cell(row=r, column=2, value=_pn(h.get(key)))
+        cell.number_format = _NUM_ACCT
+        r += 1
+
+    # Line Items
+    r += 2
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+    ws.cell(row=r, column=1, value='Line Items').font = _FNT_SEC
+    ws.cell(row=r, column=1).fill = _FILL_LIGHT
+    for c in range(2, 6):
+        ws.cell(row=r, column=c).fill = _FILL_LIGHT
+    r += 1
+    hdr_row = r
+    for ci, txt in enumerate(['#', 'Item Name', 'LP Amount', 'Type', 'Commit'], 1):
+        c = ws.cell(row=r, column=ci, value=txt)
+        c.font = _FNT_HDR
+        c.fill = _FILL_LIGHT
+        c.border = _BDR_MED
+        if ci == 3: c.alignment = _ALIGN_R
+        elif ci >= 4: c.alignment = _ALIGN_C
+    r += 1
+
+    item_start = r
+    for idx, it in enumerate(items):
+        ws.cell(row=r, column=1, value=idx + 1).font = _FNT_NORM
+        ws.cell(row=r, column=2, value=it.get('item_name', '')).font = _FNT_NORM
+        amt_cell = ws.cell(row=r, column=3, value=_pn(it.get('LP_signed_amount')))
+        amt_cell.number_format = _NUM_ACCT
+        amt_cell.alignment = _ALIGN_R
+        ws.cell(row=r, column=4, value='Call' if it.get('Transaction_type') == 'call' else 'Dist').alignment = _ALIGN_C
+        ws.cell(row=r, column=5, value='Yes' if it.get('Commitment_affecting') else 'No').alignment = _ALIGN_C
+        # Alternate row shading
+        if idx % 2 == 1:
+            for c in range(1, 6):
+                ws.cell(row=r, column=c).fill = _FILL_GRAY
+        r += 1
+    item_end = r - 1
+
+    # Summary with FORMULAS
+    r += 1
+    ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+    ws.cell(row=r, column=1, value='Summary').font = _FNT_SEC
+    ws.cell(row=r, column=1).fill = _FILL_LIGHT
+    for c in range(2, 6):
+        ws.cell(row=r, column=c).fill = _FILL_LIGHT
+    r += 1
+
+    col_amt = get_column_letter(3)
+    col_type = get_column_letter(4)
+    col_ca = get_column_letter(5)
+
+    summary_items = [
+        ('Commitment Affecting — Calls', f'=SUMPRODUCT(({col_type}{item_start}:{col_type}{item_end}="Call")*({col_ca}{item_start}:{col_ca}{item_end}="Yes")*({col_amt}{item_start}:{col_amt}{item_end}))'),
+        ('Commitment Affecting — Distributions', f'=SUMPRODUCT(({col_type}{item_start}:{col_type}{item_end}="Dist")*({col_ca}{item_start}:{col_ca}{item_end}="Yes")*({col_amt}{item_start}:{col_amt}{item_end}))'),
+        ('Commitment Affecting — Subtotal', None),  # =SUM of above 2
+        ('Non-Commitment — Calls', f'=SUMPRODUCT(({col_type}{item_start}:{col_type}{item_end}="Call")*({col_ca}{item_start}:{col_ca}{item_end}="No")*({col_amt}{item_start}:{col_amt}{item_end}))'),
+        ('Non-Commitment — Distributions', f'=SUMPRODUCT(({col_type}{item_start}:{col_type}{item_end}="Dist")*({col_ca}{item_start}:{col_ca}{item_end}="No")*({col_amt}{item_start}:{col_amt}{item_end}))'),
+        ('Non-Commitment — Subtotal', None),
+        ('Total Calls', None),
+        ('Total Distributions', None),
+        ('Net Amount', None),
+    ]
+    sum_start = r
+    for i, (label, formula) in enumerate(summary_items):
+        ws.cell(row=r, column=2, value=label).font = _FNT_NORM
+        cell = ws.cell(row=r, column=3)
+        cell.number_format = _NUM_ACCT
+        cell.alignment = _ALIGN_R
+        if formula:
+            cell.value = formula
+        elif i == 2:  # CA Subtotal
+            cell.value = f'={col_amt}{sum_start}+{col_amt}{sum_start + 1}'
+            cell.font = _FNT_BOLD
+            cell.border = Border(top=Side('thin', color=_XS_BDR))
+        elif i == 5:  # NC Subtotal
+            cell.value = f'={col_amt}{sum_start + 3}+{col_amt}{sum_start + 4}'
+            cell.font = _FNT_BOLD
+            cell.border = Border(top=Side('thin', color=_XS_BDR))
+        elif i == 6:  # Total Calls
+            cell.value = f'={col_amt}{sum_start}+{col_amt}{sum_start + 3}'
+        elif i == 7:  # Total Dist
+            cell.value = f'={col_amt}{sum_start + 1}+{col_amt}{sum_start + 4}'
+        elif i == 8:  # Net
+            cell.value = f'={col_amt}{r - 2}+{col_amt}{r - 1}'
+            cell.font = _FNT_BOLD
+            cell.border = _BDR_TOP_DBL
+            ws.cell(row=r, column=2).font = _FNT_BOLD
+        r += 1
+
+    # Column widths
+    ws.column_dimensions['A'].width = 18
+    ws.column_dimensions['B'].width = 45
+    ws.column_dimensions['C'].width = 20
+    ws.column_dimensions['D'].width = 10
+    ws.column_dimensions['E'].width = 10
+    # Freeze pane below header info
+    ws.freeze_panes = f'A{hdr_row + 1}'
+
+
+def _xs_wire_sheet(wb, notice):
+    """Build Wire Info sheet."""
+    ws = wb.create_sheet('Wire Info')
+    h = notice['header']
+    wires = h.get('wire_info', [])
+    wire = wires[0] if wires else None
+    net = _pn(h.get('LP_net_amount'))
+
+    ws.merge_cells('A1:B1')
+    ws.cell(row=1, column=1, value='Wire Information').font = _FNT_TITLE
+    ws.cell(row=1, column=1).fill = _FILL_NAVY
+    ws.cell(row=1, column=2).fill = _FILL_NAVY
+    ws.row_dimensions[1].height = 30
+
+    r = 3
+    ws.cell(row=r, column=1, value='Direction').font = _FNT_BOLD
+    ws.cell(row=r, column=2, value='Outbound (Capital Call)' if net and net > 0 else 'Inbound (Distribution)' if net and net < 0 else 'Adjustment')
+    r += 1
+    ws.cell(row=r, column=1, value='Net Amount').font = _FNT_BOLD
+    c = ws.cell(row=r, column=2, value=net)
+    c.number_format = _NUM_ACCT
+
+    if not wire:
+        r += 2
+        ws.cell(row=r, column=1, value='Wire 정보 없음').font = _FNT_SMALL
+    else:
+        # Beneficiary Bank
+        r += 2
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+        ws.cell(row=r, column=1, value='Beneficiary Bank (수익자 은행)').font = _FNT_SEC
+        ws.cell(row=r, column=1).fill = _FILL_LIGHT
+        ws.cell(row=r, column=2).fill = _FILL_LIGHT
+        r += 1
+        for label, key in [('Bank Name', 'beneficiary_bank_name'), ('Address', 'beneficiary_bank_address'),
+                           ('SWIFT / BIC', 'beneficiary_bank_swift_code'), ('ABA Routing', 'beneficiary_bank_aba_routing'),
+                           ('Account #', 'beneficiary_bank_account_number')]:
+            val = wire.get(key, '') or ''
+            if val and val != 'N/A':
+                ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
+                ws.cell(row=r, column=1).fill = _FILL_GRAY
+                ws.cell(row=r, column=2, value=val).font = _FNT_NORM
+                if 'account' in key.lower() or 'routing' in key.lower():
+                    ws.cell(row=r, column=2).number_format = '@'  # 텍스트 서식 (앞자리 0 보존)
+                r += 1
+
+        # Beneficiary
+        bn = wire.get('beneficiary_name', '') or wire.get('beneficiary_account_name', '') or ''
+        ba = wire.get('beneficiary_account_number', '') or ''
+        if (bn and bn != 'N/A') or (ba and ba != 'N/A'):
+            r += 1
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+            ws.cell(row=r, column=1, value='Beneficiary (수익자)').font = _FNT_SEC
+            ws.cell(row=r, column=1).fill = _FILL_LIGHT
+            ws.cell(row=r, column=2).fill = _FILL_LIGHT
+            r += 1
+            if bn and bn != 'N/A':
+                ws.cell(row=r, column=1, value='Name').font = _FNT_BOLD
+                ws.cell(row=r, column=1).fill = _FILL_GRAY
+                ws.cell(row=r, column=2, value=bn)
+                r += 1
+            if ba and ba != 'N/A':
+                ws.cell(row=r, column=1, value='Account #').font = _FNT_BOLD
+                ws.cell(row=r, column=1).fill = _FILL_GRAY
+                ws.cell(row=r, column=2, value=ba).number_format = '@'
+                r += 1
+
+        # Reference / Further Credit
+        ref = wire.get('reference', '') or ''
+        fc = wire.get('further_credit', '') or ''
+        if (ref and ref != 'N/A') or (fc and fc != 'N/A'):
+            if ref and ref != 'N/A':
+                ws.cell(row=r, column=1, value='Reference').font = _FNT_BOLD
+                ws.cell(row=r, column=1).fill = _FILL_GRAY
+                ws.cell(row=r, column=2, value=ref)
+                r += 1
+            if fc and fc != 'N/A':
+                ws.cell(row=r, column=1, value='Further Credit').font = _FNT_BOLD
+                ws.cell(row=r, column=1).fill = _FILL_GRAY
+                ws.cell(row=r, column=2, value=fc)
+                r += 1
+
+        # Intermediary
+        ib = wire.get('intermediary_bank_name', '') or ''
+        if ib and ib != 'N/A':
+            r += 1
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+            ws.cell(row=r, column=1, value='Intermediary Bank (중개은행)').font = _FNT_SEC
+            ws.cell(row=r, column=1).fill = _FILL_LIGHT
+            ws.cell(row=r, column=2).fill = _FILL_LIGHT
+            r += 1
+            for label, key in [('Bank Name', 'intermediary_bank_name'), ('SWIFT / BIC', 'intermediary_swift_code'),
+                               ('Account #', 'intermediary_account_number')]:
+                val = wire.get(key, '') or ''
+                if val and val != 'N/A':
+                    ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
+                    ws.cell(row=r, column=1).fill = _FILL_GRAY
+                    ws.cell(row=r, column=2, value=val)
+                    r += 1
+
+    ws.column_dimensions['A'].width = 20
+    ws.column_dimensions['B'].width = 55
+
+
+def _xs_commitment_sheet(wb, notices, current_id):
+    """Build Commitment sheet with formulas."""
+    ws = wb.create_sheet('Commitment')
+    if not notices:
+        ws.cell(row=1, column=1, value='데이터 없음')
+        return
+
+    h0 = notices[0]['header']
+    commit = None
+    for n in notices:
+        c = _pn(n['header'].get('Commitment_original'))
+        if c: commit = c
+
+    # Title
+    ws.merge_cells('A1:I1')
+    ws.cell(row=1, column=1,
+        value=f"Commitment History — {h0.get('Underlying_Fund_Name_full', '')}").font = _FNT_TITLE
+    ws.cell(row=1, column=1).fill = _FILL_NAVY
+    for c in range(2, 10):
+        ws.cell(row=1, column=c).fill = _FILL_NAVY
+    ws.row_dimensions[1].height = 30
+
+    # Subtitle
+    ws.cell(row=2, column=1, value=f'Commitment: {commit:,.2f}' if commit else 'Commitment: N/A').font = _FNT_SMALL
+    currency = h0.get('Currency', 'USD') or 'USD'
+    if currency == 'N/A': currency = 'USD'
+    ws.cell(row=2, column=2, value=f'Currency: {currency}').font = _FNT_SMALL
+    ws.cell(row=2, column=3, value=f'Notices: {len(notices)}').font = _FNT_SMALL
+
+    # Headers (row 4) — 웹 UI와 동기화된 컬럼명
+    headers = ['#', 'Date', 'Type', 'Funded Prior', '약정 소진', 'Funded After', 'Unfunded After', '소진율', 'Δ']
+    for ci, txt in enumerate(headers, 1):
+        ws.cell(row=4, column=ci, value=txt)
+    _xs_style_header_row(ws, 4, 9)
+
+    # Data rows
+    prev_pct = None
+    for i, n in enumerate(notices):
+        r = 5 + i
+        hh = n['header']
+        is_cur = (n['id'] == current_id)
+        uf_prior = _pn(hh.get('Unfunded_prior'))
+        uf_after = _pn(hh.get('Unfunded_after'))
+        funded_prior = (commit - uf_prior) if commit and uf_prior is not None else None
+        funded_after = (commit - uf_after) if commit and uf_after is not None else None
+        pct = (1 - uf_after / commit) if commit and uf_after is not None else None
+        delta = (pct - prev_pct) if pct is not None and prev_pct is not None else (pct if pct is not None and i == 0 else None)
+
+        # 약정 소진 (CA amount)
+        ca = 0
+        for it in n.get('line_items', []):
+            if it.get('is_subtotal'): continue
+            if it.get('Commitment_affecting'):
+                a = _pn(it.get('LP_signed_amount'))
+                if a is not None: ca += a
+
+        ws.cell(row=r, column=1, value=i + 1).alignment = _ALIGN_C
+        dt_val = _xs_date(hh.get('issue_date', ''))
+        c_date = ws.cell(row=r, column=2, value=dt_val)
+        if isinstance(dt_val, dt_date): c_date.number_format = _DATE
+        ws.cell(row=r, column=3, value=hh.get('notice_type', '')).alignment = _ALIGN_C
+        ws.cell(row=r, column=4, value=funded_prior).number_format = _NUM_ACCT
+        ws.cell(row=r, column=4).alignment = _ALIGN_R
+        ws.cell(row=r, column=5, value=round(ca, 2) if ca else 0).number_format = _NUM_ACCT
+        ws.cell(row=r, column=5).alignment = _ALIGN_R
+        ws.cell(row=r, column=6, value=funded_after).number_format = _NUM_ACCT
+        ws.cell(row=r, column=6).alignment = _ALIGN_R
+        ws.cell(row=r, column=7, value=uf_after).number_format = _NUM_ACCT
+        ws.cell(row=r, column=7).alignment = _ALIGN_R
+        c_pct = ws.cell(row=r, column=8, value=pct)
+        c_pct.number_format = _PCT
+        c_pct.alignment = _ALIGN_R
+        c_pct.font = _FNT_BOLD
+        c_delta = ws.cell(row=r, column=9, value=delta)
+        c_delta.number_format = '+0.0%;-0.0%'
+        c_delta.alignment = _ALIGN_R
+
+        # Highlight current notice
+        if is_cur:
+            for c in range(1, 10):
+                ws.cell(row=r, column=c).fill = _FILL_CUR
+                if c in (1, 2, 3): ws.cell(row=r, column=c).font = _FNT_BOLD
+
+        prev_pct = pct
+
+    # Column widths
+    for col, w in [('A', 6), ('B', 14), ('C', 12), ('D', 18), ('E', 18), ('F', 18), ('G', 18), ('H', 12), ('I', 10)]:
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = 'A5'
+
+
+def _xs_exposure_sheet(wb, notices, current_id, asset_groups=None):
+    """Build Exposure sheet with subtotals and formulas."""
+    ws = wb.create_sheet('Asset Exposure')
+    if not notices:
+        ws.cell(row=1, column=1, value='데이터 없음')
+        return
+
+    h0 = notices[0]['header']
+    n_count = len(notices)
+
+    # Title
+    title = f"Asset Exposure Matrix — {h0.get('Underlying_Fund_Name_short', '')} / {h0.get('LP_Name_short', '')}"
+    last_col = n_count + 3  # A:Group, B:Raw, C~:notices, last:Total
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col)
+    ws.cell(row=1, column=1, value=title).font = _FNT_TITLE
+    ws.cell(row=1, column=1).fill = _FILL_NAVY
+    for c in range(2, last_col + 1):
+        ws.cell(row=1, column=c).fill = _FILL_NAVY
+    ws.row_dimensions[1].height = 30
+
+    # Column headers (row 3)
+    ws.cell(row=3, column=1, value='Asset Group')
+    ws.cell(row=3, column=2, value='Item Name')
+    for ni, n in enumerate(notices):
+        dt = n['header'].get('issue_date', '')[:10] or '?'
+        tp = n['header'].get('notice_type', '')
+        ws.cell(row=3, column=3 + ni, value=f"#{ni + 1} {dt} ({tp})")
+    ws.cell(row=3, column=last_col, value='Total')
+    _xs_style_header_row(ws, 3, last_col)
+
+    # Build grouped data
+    groups = {}  # canonical → {raw → [amts per notice]}
+    ag = asset_groups or {}
+    ag_reverse = {}
+    for canonical, members in ag.items():
+        for m in (members or []):
+            ag_reverse[m] = canonical
+
+    def _get_canonical(raw):
+        if raw in ag_reverse: return ag_reverse[raw]
+        return raw  # fallback
+
+    for ni, n in enumerate(notices):
+        if n.get('is_voided'): continue
+        for it in n.get('line_items', []):
+            if it.get('is_subtotal'): continue
+            raw = it.get('item_name', '')
+            if not raw: continue
+            canonical = _get_canonical(raw)
+            if canonical not in groups: groups[canonical] = {}
+            if raw not in groups[canonical]: groups[canonical][raw] = [0] * n_count
+            amt = _pn(it.get('LP_signed_amount')) or 0
+            groups[canonical][raw][ni] += amt
+
+    # Write data
+    r = 4
+    canonicals = sorted(groups.keys(), key=lambda s: s.lower())
+    for canonical in canonicals:
+        raw_map = groups[canonical]
+        raw_names = sorted(raw_map.keys())
+        group_start = r
+
+        for raw in raw_names:
+            amts = raw_map[raw]
+            ws.cell(row=r, column=1, value=canonical if r == group_start else '').font = _FNT_NORM
+            ws.cell(row=r, column=2, value=raw).font = _FNT_NORM
+            total_col_letter = get_column_letter(last_col)
+            first_data_col = get_column_letter(3)
+            last_data_col = get_column_letter(2 + n_count)
+            for ni, amt in enumerate(amts):
+                if amt != 0:
+                    c = ws.cell(row=r, column=3 + ni, value=round(amt, 2))
+                    c.number_format = _NUM_ACCT
+                    c.alignment = _ALIGN_R
+            # Total column — formula
+            ws.cell(row=r, column=last_col,
+                value=f'=SUM({first_data_col}{r}:{last_data_col}{r})').number_format = _NUM_ACCT
+            ws.cell(row=r, column=last_col).alignment = _ALIGN_R
+            r += 1
+
+        # Subtotal row (only if >1 raw names)
+        if len(raw_names) > 1:
+            ws.cell(row=r, column=1, value=f'Subtotal: {canonical}').font = _FNT_BOLD
+            for ci in range(3, last_col + 1):
+                col_l = get_column_letter(ci)
+                c = ws.cell(row=r, column=ci,
+                    value=f'=SUM({col_l}{group_start}:{col_l}{r - 1})')
+                c.number_format = _NUM_ACCT
+                c.alignment = _ALIGN_R
+                c.font = _FNT_BOLD
+                c.border = Border(top=Side('thin', color=_XS_BDR))
+            r += 1
+
+    # Grand Total
+    r += 1
+    ws.cell(row=r, column=1, value='Grand Total').font = Font(name='Calibri', size=10, bold=True, color=_XS_WHITE)
+    ws.cell(row=r, column=1).fill = _FILL_NAVY
+    for ci in range(2, last_col + 1):
+        ws.cell(row=r, column=ci).fill = _FILL_NAVY
+        if ci >= 3:
+            # Sum all data cells in this column (skip subtotal rows — use raw data)
+            col_l = get_column_letter(ci)
+            c = ws.cell(row=r, column=ci,
+                value=f'=SUMPRODUCT((A4:A{r - 2}<>"")*({col_l}4:{col_l}{r - 2}))')
+            c.number_format = _NUM_ACCT
+            c.font = Font(name='Calibri', size=10, bold=True, color=_XS_WHITE)
+            c.alignment = _ALIGN_R
+
+    # Column widths
+    ws.column_dimensions['A'].width = 28
+    ws.column_dimensions['B'].width = 35
+    for ci in range(3, last_col + 1):
+        ws.column_dimensions[get_column_letter(ci)].width = 18
+    ws.freeze_panes = 'C4'
+
+
+@app.post("/api/export")
+async def export_excel(body: dict, request: Request):
+    """Generate professional Excel report with openpyxl."""
+    user = await get_current_user(request)
+    notice_id = body.get("notice_id", "")
+    scope = body.get("scope", "current")  # 'current' | 'all'
+    fmt = body.get("format", "xlsx")
+
+    # Load current notice
+    r = await check_notice_access(notice_id, user)
+    if not r:
+        raise HTTPException(404, "Notice not found")
+    header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
+    items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
+    _migrate_header_wire(header)
+    _normalize_header_wire_beneficiary(header)
+    current_notice = {"id": r["id"], "header": header, "line_items": items,
+                      "is_voided": bool(r.get("is_voided")), "fileName": r.get("file_name", "")}
+
+    # Collect Fund+LP notices for Exposure/Commitment
+    fund_key = header.get("Fund_ID_Key", "") or _make_fund_id_key(header.get("Underlying_Fund_Name_full", ""))
+    lp_code = header.get("LP_code", "")
+    lp_full = header.get("LP_Name_full", "")
+
+    if is_admin(user):
+        all_rows = db_list("notices", order_col="created_at", order_desc=False)
+    else:
+        all_rows = db_list("notices", order_col="created_at", order_desc=False, org_id=user.get("org_id", ""))
+
+    fund_lp_notices = []
+    for nr in all_rows:
+        nh = nr["header"] if isinstance(nr["header"], dict) else json.loads(nr["header"] or "{}")
+        ni = nr["line_items"] if isinstance(nr["line_items"], list) else json.loads(nr["line_items"] or "[]")
+        nfk = nh.get("Fund_ID_Key", "") or _make_fund_id_key(nh.get("Underlying_Fund_Name_full", ""))
+        if nfk != fund_key:
+            continue
+        if lp_code:
+            if (nh.get("LP_code", "") or "") != lp_code:
+                continue
+        else:
+            if (nh.get("LP_Name_full", "") or "") != lp_full:
+                continue
+        _migrate_header_wire(nh)
+        _normalize_header_wire_beneficiary(nh)
+        fund_lp_notices.append({
+            "id": nr["id"], "header": nh, "line_items": ni,
+            "is_voided": bool(nr.get("is_voided")),
+            "fileName": nr.get("file_name", "")
+        })
+    # Sort by issue_date
+    fund_lp_notices.sort(key=lambda x: x["header"].get("issue_date", "") or "")
+    non_voided = [n for n in fund_lp_notices if not n["is_voided"]]
+
+    # Load asset groups
+    ag = {}
+    try:
+        ag_row = db_get("asset_groups", fund_key, id_col="fund_key")
+        if ag_row:
+            g = ag_row.get("groups")
+            if isinstance(g, str): g = json.loads(g)
+            if g: ag = g
+    except:
+        pass
+
+    # Build workbook
+    wb = Workbook()
+    wb.remove(wb.active)  # remove default Sheet
+
+    if scope == 'current':
+        _xs_notice_sheet(wb, current_notice, 'Notice')
+    else:
+        for i, n in enumerate(non_voided):
+            dt = (n["header"].get("issue_date", "") or "")[:10]
+            name = f"Notice_{i + 1}_{dt}"[:31]
+            _xs_notice_sheet(wb, n, name)
+
+    _xs_wire_sheet(wb, current_notice)
+    _xs_exposure_sheet(wb, non_voided, notice_id, ag)
+    _xs_commitment_sheet(wb, non_voided, notice_id)
+
+    # Sheet tab colors
+    for ws in wb.worksheets:
+        if 'Notice' in ws.title:
+            ws.sheet_properties.tabColor = _XS_NAVY[2:]
+        elif ws.title == 'Wire Info':
+            ws.sheet_properties.tabColor = _XS_GREEN[2:]
+        elif ws.title == 'Asset Exposure':
+            ws.sheet_properties.tabColor = _XS_AMBER[2:]
+        elif ws.title == 'Commitment':
+            ws.sheet_properties.tabColor = _XS_NAVY[2:]
+
+    # Save to buffer
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    # Filename
+    fund_short = (header.get("Underlying_Fund_Name_short", "") or "Fund").replace("/", "_")[:30]
+    lp_short = (lp_code or header.get("LP_Name_short", "") or "LP").replace("/", "_")[:30]
+    dt_str = (header.get("issue_date", "") or "export")[:10]
+    filename = f"{fund_short}_{lp_short}_{dt_str if scope == 'current' else 'ALL'}.xlsx"
+
+    from starlette.responses import Response
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))

@@ -5537,411 +5537,43 @@ function rExportPopup(){
   </div>`;
 }
 
-/* 숫자를 Excel용 raw number로 변환 (HTML 태그 없이) */
-function _exNum(v){
-  const n=pN(v);
-  return n!=null?n:null;
-}
-
-/* 같은 Fund+LP notices 수집 (날짜순) */
-function _exFundLpNotices(notice){
-  const h=notice.header;
-  const fundKey=getFundKey(h);
-  const lpCode=h.LP_code||'';
-  const lpFull=h.LP_Name_full||'';
-  return S.notices.filter(x=>{
-    if(getFundKey(x.header)!==fundKey) return false;
-    if(lpCode) return (x.header.LP_code||'')===lpCode;
-    return (x.header.LP_Name_full||'')===lpFull;
-  }).sort((a,b)=>(fmtDate(a.header.issue_date||'')).localeCompare(fmtDate(b.header.issue_date||'')));
-}
-
-/* Notice 시트 생성 (1건) */
-function _exNoticeSheet(notice){
-  const h=notice.header;
-  const rows=[];
-  // Header section
-  rows.push(['Fund Name', h.Underlying_Fund_Name_full||h.Underlying_Fund_Name_short||'N/A']);
-  rows.push(['Notice Type', h.notice_type||'N/A']);
-  rows.push(['Notice Title', h.notice_title||'']);
-  rows.push(['Notice Number', h.notice_number||'']);
-  rows.push(['Issue Date', fmtDate(h.issue_date)||'N/A']);
-  rows.push(['Due Date', fmtDate(h.due_date)||'N/A']);
-  rows.push(['LP Name', h.LP_Name_full||h.LP_Name_short||'N/A']);
-  rows.push(['LP Code', h.LP_code||'N/A']);
-  rows.push(['Commitment', _exNum(h.Commitment_original)]);
-  rows.push(['LP Interest %', h.pct_LP_Interest!=null?h.pct_LP_Interest:null]);
-  rows.push([]);
-  rows.push(['--- Prior to Current Notice ---']);
-  rows.push(['Unfunded Commitment (Prior)', _exNum(h.Unfunded_prior)]);
-  rows.push(['Cumul. Contributions (Prior)', _exNum(h.CumContribPrior)]);
-  rows.push(['Cumul. Distributions (Prior)', _exNum(h.CumDistribPrior)]);
-  rows.push([]);
-  rows.push(['--- Current Notice ---']);
-  rows.push(['Current Contributions', _exNum(h.Current_Commit_Contribution)]);
-  rows.push(['Current Distributions', _exNum(h.Current_Commit_Distribution)]);
-  rows.push(['LP Net Amount', _exNum(h.LP_net_amount)]);
-  rows.push([]);
-  rows.push(['--- After Current Notice ---']);
-  rows.push(['Unfunded Commitment (After)', _exNum(h.Unfunded_after)]);
-  rows.push(['Cumul. Contributions (After)', _exNum(h.CumContribAfter)]);
-  rows.push(['Cumul. Distributions (After)', _exNum(h.CumDistribAfter)]);
-  rows.push([]);
-  rows.push([]);
-
-  // Line Items section
-  const ri=realItems(notice.lineItems||[]);
-  rows.push(['#', 'Item Name', 'LP Amount', 'Type', 'Commitment Affecting']);
-  ri.forEach((it,i)=>{
-    rows.push([i+1, it.item_name||'', _exNum(it.LP_signed_amount), it.Transaction_type==='call'?'Call':'Distribution', it.Commitment_affecting?'Yes':'No']);
-  });
-  rows.push([]);
-
-  // Summary
-  let caCallS=0,caDistS=0,ncCallS=0,ncDistS=0;
-  ri.forEach(it=>{
-    const a=pN(it.LP_signed_amount);if(a==null)return;
-    const isCall=it.Transaction_type==='call';
-    const isCa=it.Commitment_affecting;
-    if(isCa&&isCall)caCallS+=a;else if(isCa&&!isCall)caDistS+=a;
-    else if(!isCa&&isCall)ncCallS+=a;else ncDistS+=a;
-  });
-  rows.push(['Summary']);
-  rows.push(['', 'Commitment Affecting - Calls', rd(caCallS)]);
-  rows.push(['', 'Commitment Affecting - Distributions', rd(caDistS)]);
-  rows.push(['', 'Commitment Affecting - Subtotal', rd(caCallS+caDistS)]);
-  rows.push(['', 'Non-Commitment - Calls', rd(ncCallS)]);
-  rows.push(['', 'Non-Commitment - Distributions', rd(ncDistS)]);
-  rows.push(['', 'Non-Commitment - Subtotal', rd(ncCallS+ncDistS)]);
-  rows.push(['', 'Total Calls', rd(caCallS+ncCallS)]);
-  rows.push(['', 'Total Distributions', rd(caDistS+ncDistS)]);
-  rows.push(['', 'Net Amount', rd(caCallS+caDistS+ncCallS+ncDistS)]);
-
-  return rows;
-}
-
-/* Wire Info 시트 — 단건 */
-function _exWireSheetSingle(notice){
-  const h=notice.header;
-  const wire=(h.wire_info||[])[0]||null;
-  const netAmt=pN(h.LP_net_amount);
-  const rows=[];
-  rows.push(['Direction', netAmt>0?'Outbound (Capital Call)':netAmt<0?'Inbound (Distribution)':'Adjustment']);
-  rows.push(['Net Amount', _exNum(h.LP_net_amount)]);
-  rows.push([]);
-  if(wire){
-    rows.push(['--- Beneficiary Bank ---']);
-    rows.push(['Bank Name', wire.beneficiary_bank_name||'']);
-    rows.push(['Address', wire.beneficiary_bank_address||'']);
-    rows.push(['SWIFT / BIC', wire.beneficiary_bank_swift_code||wire.beneficiary_swift_code||'']);
-    rows.push(['ABA Routing', wire.beneficiary_bank_aba_routing||wire.beneficiary_aba_routing||'']);
-    rows.push(['Account #', wire.beneficiary_bank_account_number||'']);
-    // Beneficiary 섹션: 정규화 후 데이터가 있을 때만
-    const _bn=wire.beneficiary_name||wire.beneficiary_account_name||'';
-    const _ba=wire.beneficiary_account_number||'';
-    if((_bn&&_bn!=='N/A')||(_ba&&_ba!=='N/A')){
-      rows.push([]);
-      rows.push(['--- Beneficiary ---']);
-      rows.push(['Name', _bn]);
-      rows.push(['Account #', _ba]);
-    }
-    if(wire.reference||wire.further_credit){
-      rows.push([]);
-      rows.push(['--- Additional ---']);
-      if(wire.reference) rows.push(['Reference', wire.reference]);
-      if(wire.further_credit) rows.push(['Further Credit', wire.further_credit]);
-    }
-    if(wire.intermediary_bank_name||wire.intermediary_swift_code){
-      rows.push([]);
-      rows.push(['--- Intermediary Bank ---']);
-      rows.push(['Bank Name', wire.intermediary_bank_name||'']);
-      rows.push(['SWIFT / BIC', wire.intermediary_swift_code||'']);
-      rows.push(['Account #', wire.intermediary_account_number||'']);
-    }
-  } else {
-    rows.push(['Wire 정보 없음']);
-  }
-  return rows;
-}
-
-/* Wire Info 시트 — 누적 (이력 테이블) */
-function _exWireSheetAll(notice){
-  const history=buildWireHistory(notice);
-  const rows=[];
-  rows.push(['Date', 'Direction', 'SWIFT (Bank)', 'Account # (Bank)', 'Bank Name', 'Match']);
-  history.forEach(wh=>{
-    rows.push([
-      wh.date,
-      wh.dir==='outbound'?'Out':'In',
-      wh.swift||'',
-      wh.acct||'',
-      wh.acctName||'',
-      wh.matchStatus==='match'?'✓':wh.matchStatus==='mismatch'?'⚠':wh.matchStatus==='first'?'-':'-'
-    ]);
-  });
-  return rows;
-}
-
-/* Exposure 시트 — AI 그룹화 반영 + Subtotal */
-function _exExposureSheet(notice){
-  const h=notice.header;
-  const fundKey=getFundKey(h);
-  const lpCode=h.LP_code||'';
-  const lpFull=h.LP_Name_full||'';
-
-  const allFundLp=_exFundLpNotices(notice);
-  const nLen=allFundLp.length;
-
-  // Collect raw items
-  const rawItems=[];
-  allFundLp.forEach((n,ni)=>{
-    if(n.is_voided) return;
-    realItems(n.lineItems||[]).forEach(it=>{
-      const raw=it.item_name||'';
-      if(!raw) return;
-      rawItems.push({raw, amt:pN(it.LP_signed_amount)||0, ni});
-    });
-  });
-
-  // Grouping logic (same as rExposure)
-  const aiGroups=S._assetGroups[fundKey]||null;
-  const overrides=S._assetGroupOverrides[fundKey]||{};
-  const aiReverse={};
-  if(aiGroups){
-    Object.entries(aiGroups).forEach(([canonical, members])=>{
-      (members||[]).forEach(m=>{ aiReverse[m]=canonical; });
-    });
-  }
-  function getCanonical(rawName){
-    if(overrides[rawName]) return overrides[rawName];
-    if(aiReverse[rawName]) return aiReverse[rawName];
-    return normalizeAssetName(rawName)||rawName;
-  }
-
-  // Build grouped data: canonical → { rawMap: { rawName → [amounts per notice] } }
-  const groups={};
-  rawItems.forEach(({raw, amt, ni})=>{
-    const key=getCanonical(raw);
-    if(!groups[key]) groups[key]={rawMap:{}};
-    if(!groups[key].rawMap[raw]) groups[key].rawMap[raw]=new Array(nLen).fill(0);
-    groups[key].rawMap[raw][ni]+=amt;
-  });
-
-  const canonicals=Object.keys(groups).sort((a,b)=>a.localeCompare(b,undefined,{sensitivity:'base'}));
-
-  // Build header row
-  const headerRow=['Canonical Group', 'Raw Item Name'];
-  allFundLp.forEach((n,ni)=>{
-    const d=fmtDate(n.header.issue_date||n.header.due_date||'');
-    const tp=n.header.notice_type||'';
-    headerRow.push(`#${ni+1} ${d} (${tp})`);
-  });
-  headerRow.push('Total');
-
-  const rows=[];
-  rows.push([`Asset Exposure Matrix — ${h.Underlying_Fund_Name_short||h.Underlying_Fund_Name_full||''} / ${h.LP_Name_short||h.LP_Name_full||''}`]);
-  rows.push([]);
-  rows.push(headerRow);
-
-  const grandTotal=new Array(nLen).fill(0);
-
-  canonicals.forEach(canonical=>{
-    const g=groups[canonical];
-    const rawNames=Object.keys(g.rawMap).sort();
-    const groupTotal=new Array(nLen).fill(0);
-
-    rawNames.forEach(raw=>{
-      const amts=g.rawMap[raw];
-      const row=[canonical, raw];
-      let rowTotal=0;
-      amts.forEach((a,ni)=>{
-        row.push(a!==0?rd(a):null);
-        groupTotal[ni]+=a;
-        grandTotal[ni]+=a;
-        rowTotal+=a;
-      });
-      row.push(rd(rowTotal));
-      rows.push(row);
-    });
-
-    // Subtotal 행 — raw name이 2개 이상인 그룹만
-    if(rawNames.length>1){
-      const subRow=[`  Subtotal: ${canonical}`, ''];
-      let subTotal=0;
-      groupTotal.forEach(v=>{subRow.push(rd(v));subTotal+=v;});
-      subRow.push(rd(subTotal));
-      rows.push(subRow);
-    }
-  });
-
-  // Grand Total
-  const gtRow=['Grand Total', ''];
-  let gt=0;
-  grandTotal.forEach(v=>{gtRow.push(rd(v));gt+=v;});
-  gtRow.push(rd(gt));
-  rows.push([]);
-  rows.push(gtRow);
-
-  return rows;
-}
-
-/* Commitment 시트 */
-function _exCommitmentSheet(notice){
-  const h=notice.header;
-  const fundKey=getFundKey(h);
-  const lpCode=h.LP_code||'';
-  const lpFull=h.LP_Name_full||'';
-  const currency=h.Currency&&h.Currency!=='N/A'?h.Currency:'USD';
-
-  const allNotices=_exFundLpNotices(notice);
-  const dataRows=allNotices.filter(x=>!x.is_voided).map((n,i)=>{
-    const hh=n.header;
-    const commit=pN(hh.Commitment_original);
-    const unfPrior=pN(hh.Unfunded_prior);
-    const unfAfter=pN(hh.Unfunded_after);
-    const funded=(commit!=null&&unfAfter!=null)?commit-unfAfter:null;
-    const fundedPrior=(commit!=null&&unfPrior!=null)?commit-unfPrior:null;
-    const pct=(commit&&unfAfter!=null)?(1-unfAfter/commit)*100:null;
-    let caAmount=0;
-    realItems(n.lineItems||[]).forEach(it=>{
-      if(it.Commitment_affecting){const a=pN(it.LP_signed_amount);if(a!=null)caAmount+=a;}
-    });
-    return{idx:i+1,commit,unfPrior,unfAfter,funded,fundedPrior,pct:pct!=null?rd(pct):null,caAmount:rd(caAmount),
-      date:fmtDate(hh.issue_date||''),type:hh.notice_type,isCurrent:n.id===notice.id};
-  });
-
-  // Deltas
-  dataRows.forEach((r,i)=>{
-    r.deltaPct=(i>0&&r.pct!=null&&dataRows[i-1].pct!=null)?rd(r.pct-dataRows[i-1].pct):(i===0&&r.pct!=null?rd(r.pct):null);
-  });
-
-  const latestCommit=dataRows.reduce((v,r)=>r.commit||v,null);
-  const latest=dataRows.length?dataRows[dataRows.length-1]:null;
-  const latestPct=latest?latest.pct:null;
-
-  const rows=[];
-  rows.push([`Commitment History — ${h.Underlying_Fund_Name_full||h.Underlying_Fund_Name_short||''} / ${h.LP_Name_full||h.LP_Name_short||''}`]);
-  rows.push([`Commitment: ${latestCommit!=null?latestCommit:'N/A'}`, `Currency: ${currency}`, `Notices: ${dataRows.length}`]);
-  rows.push([]);
-  rows.push(['#', 'Date', 'Type', 'Funded Prior', '약정 소진', 'Funded After', 'Unfunded After', '소진율 (%)', 'Δ (%)']);
-
-  dataRows.forEach(r=>{
-    rows.push([
-      r.isCurrent?`▶ ${r.idx}`:r.idx,
-      r.date||'N/A',
-      r.type||'',
-      r.fundedPrior,
-      r.caAmount,
-      r.funded,
-      r.unfAfter,
-      r.pct,
-      r.deltaPct
-    ]);
-  });
-
-  rows.push([]);
-  rows.push(['Latest 소진율', latestPct!=null?latestPct+'%':'N/A']);
-
-  return rows;
-}
-
-/* 파일명 안전 문자열 */
-function _exSafeFileName(s){
-  return (s||'export').replace(/[\/\\?*\[\]<>|":]/g,'_').substring(0,50);
-}
-
-/* 메인 Export 실행 */
+/* ===== EXPORT — Backend openpyxl 기반 ===== */
 async function generateExport(){
-  if(typeof XLSX==='undefined'){alert('SheetJS 라이브러리 로드 실패. 페이지 새로고침 후 다시 시도하세요.');return;}
   const d=S._exportPopup; if(!d) return;
   const notice=S.notices.find(x=>x.id===S.activeNoticeId);
   if(!notice){alert('선택된 Notice가 없습니다.');return;}
 
-  const h=notice.header;
-  const fundShort=_exSafeFileName(h.Underlying_Fund_Name_short||h.Underlying_Fund_Name_full||'Fund');
-  const lpCode=_exSafeFileName(h.LP_code||h.LP_Name_short||'LP');
-  const issueDate=fmtDate(h.issue_date)||'undated';
-
-  const isXlsx=d.format==='xlsx';
-  const isAll=d.scope==='all';
+  // Show loading
+  const btn=document.querySelector('[onclick="generateExport()"]');
+  if(btn){btn.textContent='생성 중...';btn.disabled=true;}
 
   try{
-    const wb=XLSX.utils.book_new();
-
-    if(!isAll){
-      // 현재 Notice만 — 시트 4개
-      const noticeWs=XLSX.utils.aoa_to_sheet(_exNoticeSheet(notice));
-      _exApplyColWidths(noticeWs, [30,40,18,14,18]);
-      XLSX.utils.book_append_sheet(wb, noticeWs, 'Notice');
-
-      const wireWs=XLSX.utils.aoa_to_sheet(_exWireSheetSingle(notice));
-      _exApplyColWidths(wireWs, [22,50]);
-      XLSX.utils.book_append_sheet(wb, wireWs, 'Wire Info');
-
-      const expWs=XLSX.utils.aoa_to_sheet(_exExposureSheet(notice));
-      _exApplyColWidths(expWs, [30,30]);
-      XLSX.utils.book_append_sheet(wb, expWs, 'Exposure');
-
-      const cmtWs=XLSX.utils.aoa_to_sheet(_exCommitmentSheet(notice));
-      _exApplyColWidths(cmtWs, [8,14,14,18,18,18,18,12,10]);
-      XLSX.utils.book_append_sheet(wb, cmtWs, 'Commitment');
-
-    } else {
-      // 누적 Notice 모두 — Notice 시트 N개 + Wire/Exposure/Commitment 각 1개
-      const allNotices=_exFundLpNotices(notice).filter(x=>!x.is_voided);
-      allNotices.forEach((n,i)=>{
-        const dt=fmtDate(n.header.issue_date||'');
-        const sheetName=`Notice_${i+1}_${(dt||'undated').replace(/\//g,'-')}`.substring(0,31);
-        const ws=XLSX.utils.aoa_to_sheet(_exNoticeSheet(n));
-        _exApplyColWidths(ws, [30,40,18,14,18]);
-        XLSX.utils.book_append_sheet(wb, ws, sheetName);
-      });
-
-      const wireWs=XLSX.utils.aoa_to_sheet(_exWireSheetAll(notice));
-      _exApplyColWidths(wireWs, [14,10,18,22,30,8]);
-      XLSX.utils.book_append_sheet(wb, wireWs, 'Wire History');
-
-      const expWs=XLSX.utils.aoa_to_sheet(_exExposureSheet(notice));
-      _exApplyColWidths(expWs, [30,30]);
-      XLSX.utils.book_append_sheet(wb, expWs, 'Exposure');
-
-      const cmtWs=XLSX.utils.aoa_to_sheet(_exCommitmentSheet(notice));
-      _exApplyColWidths(cmtWs, [8,14,14,18,18,18,18,12,10]);
-      XLSX.utils.book_append_sheet(wb, cmtWs, 'Commitment');
-    }
-
-    const baseName=`${fundShort}_${lpCode}_${isAll?'ALL':issueDate}`;
-
-    if(isXlsx){
-      // .xlsx 직접 다운로드
-      XLSX.writeFile(wb, `${baseName}.xlsx`);
-    } else {
-      // .csv — 시트별 개별 CSV를 ZIP으로 묶기
-      if(typeof JSZip==='undefined'){alert('JSZip 라이브러리 로드 실패.');return;}
-      const zip=new JSZip();
-      wb.SheetNames.forEach(name=>{
-        const csv=XLSX.utils.sheet_to_csv(wb.Sheets[name]);
-        zip.file(`${name}.csv`, csv);
-      });
-      const blob=await zip.generateAsync({type:'blob'});
-      const url=URL.createObjectURL(blob);
-      const a=document.createElement('a');
-      a.href=url;a.download=`${baseName}.zip`;
-      document.body.appendChild(a);a.click();
-      setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},100);
-    }
-
-    S._exportPopup=null;
-    R();
+    const resp=await authFetch(`${API}/api/export`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        notice_id: notice.id,
+        scope: d.scope,
+        format: d.format
+      })
+    });
+    if(!resp.ok) throw new Error(`서버 오류: ${resp.status}`);
+    const blob=await resp.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    // Extract filename from Content-Disposition header
+    const cd=resp.headers.get('Content-Disposition');
+    const fn=cd?.match(/filename="?(.+?)"?$/)?.[1]||'export.xlsx';
+    a.href=url;a.download=fn;
+    document.body.appendChild(a);a.click();
+    setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},100);
+    S._exportPopup=null;R();
   }catch(e){
     console.error('Export failed:', e);
     alert('Export 실패: '+e.message);
+  }finally{
+    if(btn){btn.textContent='생성';btn.disabled=false;}
   }
-}
-
-/* 열 너비 설정 헬퍼 */
-function _exApplyColWidths(ws, widths){
-  ws['!cols']=widths.map(w=>({wch:w}));
 }
 
 /* Merge this fund into another fund group — unifies Fund_ID_Key so they group together */
