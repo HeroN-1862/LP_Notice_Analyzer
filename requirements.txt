@@ -4,3 +4,4 @@ httpx
 pdfplumber
 python-multipart
 supabase
+openpyxl
