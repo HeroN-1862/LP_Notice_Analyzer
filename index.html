@@ -91,8 +91,8 @@ body{font-family:var(--f);background:var(--bg0);color:var(--t1);min-height:100vh
 .sb-foot .mdl{;font-size:11px;color:var(--teal);font-weight:500}
 
 /* === MAIN === */
-.main{margin-left:var(--sw);flex:1;min-height:100vh;display:flex;flex-direction:column}
-.pg-h{padding:14px 24px 13px;border-bottom:1px solid var(--bdr);background:rgba(255,255,255,.85);backdrop-filter:blur(12px);position:sticky;top:0;z-index:40;min-height:56px;box-sizing:border-box}
+.main{margin-left:var(--sw);flex:1;min-height:100vh;display:flex;flex-direction:column;overflow-x:hidden}
+.pg-h{padding:14px 24px 13px;border-bottom:1px solid var(--bdr);background:rgba(255,255,255,.85);backdrop-filter:blur(12px);position:sticky;top:0;z-index:40;min-height:56px;box-sizing:border-box;overflow:hidden}
 .pg-h h1{font-size:16px;font-weight:700;letter-spacing:-.02em}
 .pg-h p{font-size:12px;color:var(--t2);margin-top:1px}
 .pg-b{padding:20px 24px 44px;flex:1}
@@ -638,6 +638,7 @@ function clearStorage(){
     R();  // Show upload page with loading indicator
     await loadFromBackend();
     S._portfolioLoading = false;
+    R();  // ★ 로딩 완료 → 사이드바 "로딩 중..." 제거
     // Flash portfolio sidebar tab after load
     if(S.notices.length) setTimeout(_flashPortfolioTab, 300);
   } else {
