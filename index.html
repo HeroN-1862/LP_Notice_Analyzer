@@ -795,8 +795,8 @@ function renderSB(){
           const _sbLpIsNA=!_sbLpRawFull||_sbLpRawFull==='N/A'||_sbLpRawFull==='Unknown LP';
           const lpFull=_sbLpIsNA?(_sbLpRawFull||'Unknown LP'):_sbLpRawFull;
           const lpShort=_sbLpIsNA?(n.header.LP_code||_sbLpRawShort||'Unknown LP'):(_sbLpRawShort||_sbLpRawFull);
-          const lpKey=n.header.LP_code||normalizeLpName(lpFull)||lpFull;
-          const cls=n.header.Investment_Class||'LP Interest';
+          const lpKey=_stripClassSuffix(n.header.LP_code)||normalizeLpName(_stripClassSuffix(lpFull))||lpFull;
+          const cls=_normInvClass(n.header.Investment_Class);
           if(!fundGroups[fKey].lps[lpKey]) fundGroups[fKey].lps[lpKey]={lpFull,lpShort,lpCode:n.header.LP_code||'',notices:[],classes:{}};
           fundGroups[fKey].lps[lpKey].notices.push(n);
           if(!fundGroups[fKey].lps[lpKey].classes[cls]) fundGroups[fKey].lps[lpKey].classes[cls]=[];
@@ -970,6 +970,8 @@ function viewNotice(id,autoCorrect){
   if(n){_pdfNoticeId=id;_pdfPage=1;_pdfPageCount=n.page_count||0;}
   R();
   if(autoCorrect)runAutoCorrection();
+  // ★ 별도 창 열려 있으면 새 Notice PDF 전달
+  if(_pdfWinIsOpen()) _pdfWinSyncNotice();
 }
 
 function renderPG(){
@@ -2114,7 +2116,7 @@ function buildTree(){
     const _lpIsNA=!_lpRawFull||_lpRawFull==='N/A'||_lpRawFull==='Unknown LP';
     const lpFull=_lpIsNA?(_lpRawFull||'Unknown LP'):_lpRawFull;
     const lpShort=_lpIsNA?(lpCode||_lpRawShort||'Unknown LP'):(_lpRawShort||_lpRawFull);
-    const cls=n.header.Investment_Class||'LP Interest';
+    const cls=_normInvClass(n.header.Investment_Class);
     let fKey=getFundKey(n.header);
     fKey=fundAliasMap[fKey]||fKey;
     const fDisp=S.nameReg.fund[fFull]||fShort;
@@ -2122,7 +2124,7 @@ function buildTree(){
     // Prefer longer display name
     if(fFull.length>funds[fKey].fullName.length){funds[fKey].fullName=fFull;funds[fKey].displayName=S.nameReg.fund[fFull]||fShort;}
     funds[fKey].noticeCount++;
-    const lpKey=lpCode||normalizeLpName(lpFull)||lpFull;
+    const lpKey=_stripClassSuffix(lpCode)||normalizeLpName(_stripClassSuffix(lpFull))||lpFull;
     const lpDisp=_lpIsNA?(lpCode||'N/A'):(S.nameReg.lp[lpFull]||lpShort);
     if(!funds[fKey].lps[lpKey])funds[fKey].lps[lpKey]={fullName:lpFull,displayName:lpDisp,lpCode:lpCode,classes:{},noticeCount:0};
     funds[fKey].lps[lpKey].noticeCount++;
@@ -2621,6 +2623,7 @@ function rILPA(h){
 let _pdfPage=1, _pdfExpanded=false, _pdfNoticeId=null, _pdfPageCount=0;
 let _pdfZoom=100;
 let _pdfDoc=null; // current active PDF.js document
+let _pdfWin=null; // ★ 별도 창 참조 (window.open)
 
 // ── LRU PDF Cache (방안 D) ──
 const _pdfCache=new Map(); // noticeId → pdfDoc
@@ -2692,6 +2695,18 @@ function rPdfViewer(n){
     <div style="font-size:24px;margin-bottom:8px">📄</div>
     <div style="font-size:12px">PDF가 없습니다.</div>
   </div>`;
+  // ★ 별도 창이 열려 있으면 안내 메시지 표시
+  if(_pdfWinIsOpen()){
+    return`<div style="border:1px solid var(--bdr);border-radius:var(--rl);padding:40px 20px;text-align:center;color:var(--t3);background:var(--bg2)">
+      <div style="font-size:28px;margin-bottom:10px">↗️</div>
+      <div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:4px">PDF가 별도 창에서 열려 있습니다</div>
+      <div style="font-size:11px;color:var(--t3);margin-bottom:12px">Line Item에 마우스를 올리면 별도 창에서 하이라이트됩니다</div>
+      <div style="display:flex;gap:6px;justify-content:center">
+        <button class="btn btn-sm btn-s" onclick="if(_pdfWin)_pdfWin.focus()" style="font-size:11px">별도 창 포커스</button>
+        <button class="btn btn-sm btn-s" onclick="if(_pdfWin)_pdfWin.close();_pdfWin=null;R()" style="font-size:11px;color:var(--t3)">닫기</button>
+      </div>
+    </div>`;
+  }
   if(_pdfNoticeId!==n.id){_pdfPage=1;_pdfNoticeId=n.id;_pdfPageCount=pc;_pdfZoom=100;_pdfDoc=null;}
   const zoomW=_pdfExpanded?_pdfZoom:100;
   // Trigger PDF.js render after DOM is ready
@@ -2703,7 +2718,8 @@ function rPdfViewer(n){
           <button class="btn btn-sm btn-s" onclick="pdfToggleExpand()" style="font-weight:700">✕</button>
           <input type="range" id="pdfZoomSlider" min="50" max="300" value="${_pdfZoom}" style="width:80px;accent-color:var(--indigo);cursor:pointer" oninput="pdfZoomSlide(this.value)">
           <span id="pdfZoomLabel" style="min-width:36px;text-align:center;font-size:11px">${_pdfZoom}%</span>
-        `:`<button class="btn btn-sm btn-s" onclick="pdfToggleExpand()" title="확대">⛶ 확대</button>`}
+        `:`<button class="btn btn-sm btn-s" onclick="pdfToggleExpand()" title="확대">⛶ 확대</button>
+           <button class="btn btn-sm btn-s" onclick="pdfOpenWindow()" title="별도 창으로 열기 (듀얼 모니터)">↗</button>`}
       </div>
       <div class="pdf-nav">
         <button class="btn btn-sm btn-s" onclick="pdfNav(-1)">◀</button>
@@ -2944,6 +2960,201 @@ function initPdfPan(){
 }
 initPdfPan();
 
+// ★ PDF 별도 창 (window.open) — 듀얼 모니터 지원
+function _pdfWinIsOpen(){ return _pdfWin && !_pdfWin.closed; }
+
+function pdfOpenWindow(){
+  if(_pdfWinIsOpen()){ _pdfWin.focus(); return; }
+  const n=S.notices.find(x=>x.id===S.activeNoticeId);
+  if(!n) return;
+  const title=escH((n.header.notice_title||'Notice')+' — PDF');
+  const pc=n.page_count||_pdfPageCount||1;
+
+  // 별도 창 열기 (사용자 클릭 이벤트 내 → 팝업 차단 회피)
+  _pdfWin=window.open('','_pdfViewer','width=750,height=900,resizable=yes,scrollbars=yes');
+  if(!_pdfWin){alert('팝업이 차단되었습니다. 브라우저 설정에서 팝업을 허용해주세요.');return;}
+
+  const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${title}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Inter','Noto Sans KR',sans-serif;background:#e8e8e8;overflow:hidden;display:flex;flex-direction:column;height:100vh}
+.tb{display:flex;align-items:center;gap:8px;padding:8px 14px;background:#fff;border-bottom:1px solid #e2e5ea;font-size:12px;user-select:none;flex-shrink:0}
+.tb button{padding:4px 10px;border:1px solid #d0d5dd;border-radius:5px;background:#fff;cursor:pointer;font-size:12px}
+.tb button:hover{background:#f5f6f8}
+.tb .title{flex:1;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#111827}
+.wrap{flex:1;overflow:auto;position:relative}
+.inner{position:relative;min-width:100%}
+canvas{width:100%;display:block}
+.hl{position:absolute;background:rgba(255,220,50,.25);border:2px solid rgba(255,180,0,.7);border-radius:4px;pointer-events:none;transition:all .3s ease;z-index:5;transform:scale(1);box-shadow:0 0 0 rgba(0,0,0,0);display:none}
+.hl.active{transform:scale(1.15) translateY(-2px);box-shadow:0 6px 20px rgba(255,180,0,.3),0 2px 8px rgba(0,0,0,.15);background:rgba(255,220,50,.4);border-color:rgba(255,160,0,.9);z-index:10}
+.loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.9);z-index:2;font-size:13px;color:#9ca3af}
+</style></head><body>
+<div class="tb">
+  <button onclick="_nav(-1)">◀</button>
+  <span id="pi">1 / ${pc}</span>
+  <button onclick="_nav(1)">▶</button>
+  <input type="range" id="zm" min="50" max="400" value="100" style="width:100px;accent-color:#1D3557" oninput="_zoom(this.value)">
+  <span id="zl" style="min-width:36px;text-align:center">100%</span>
+  <span class="title" id="tt">${title}</span>
+</div>
+<div class="wrap" id="cw">
+  <div class="inner" id="zw">
+    <canvas id="cv"></canvas>
+    <div class="hl" id="hl"></div>
+  </div>
+  <div class="loading" id="ld">PDF 로딩 중...</div>
+</div>
+<script>
+let _doc=null,_pg=1,_pc=${pc},_zm=100,_rendering=false;
+
+function init(doc,pg,pc){
+  _doc=doc;_pc=pc;_pg=pg||1;
+  document.getElementById('pi').textContent=_pg+' / '+_pc;
+  _render(_pg);
+}
+
+async function _render(p){
+  if(!_doc||_rendering) return;
+  _rendering=true;
+  try{
+    const page=await _doc.getPage(p);
+    const cv=document.getElementById('cv');
+    const cw=document.getElementById('cw');
+    const ld=document.getElementById('ld');
+    if(!cv)return;
+    const w=cw.clientWidth||700;
+    const vp0=page.getViewport({scale:1});
+    const scale=(w/vp0.width)*(window.devicePixelRatio||1);
+    const vp=page.getViewport({scale});
+    cv.width=vp.width;cv.height=vp.height;
+    cv.style.width='100%';cv.style.height='auto';
+    await page.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
+    if(ld)ld.style.display='none';
+    document.getElementById('pi').textContent=p+' / '+_pc;
+  }catch(e){console.error(e);}
+  _rendering=false;
+}
+
+function _nav(d){
+  const np=_pg+d;
+  if(np<1||np>_pc)return;
+  _pg=np;
+  document.getElementById('hl').style.display='none';
+  document.getElementById('ld').style.display='flex';
+  _render(_pg);
+}
+
+function _zoom(v){
+  _zm=parseInt(v);
+  document.getElementById('zw').style.width=_zm+'%';
+  document.getElementById('zl').textContent=_zm+'%';
+  clearTimeout(window._zrt);
+  window._zrt=setTimeout(()=>_render(_pg),300);
+}
+
+function _applyHL(loc){
+  if(loc.page!==_pg){
+    _pg=loc.page;
+    document.getElementById('ld').style.display='flex';
+    _render(_pg).then(()=>setTimeout(()=>_posHL(loc),120));
+    return;
+  }
+  _posHL(loc);
+}
+
+function _posHL(loc){
+  const hl=document.getElementById('hl');
+  if(!hl)return;
+  const rowLeft=Math.max(0,Math.min(loc.x_pct,3));
+  hl.style.left=rowLeft+'%';
+  hl.style.top=Math.max(0,loc.y_pct-0.3)+'%';
+  hl.style.width=(97-rowLeft)+'%';
+  hl.style.height=Math.max(1.5,loc.h_pct+1)+'%';
+  hl.style.display='block';
+  hl.classList.remove('active');
+  void hl.offsetWidth;
+  hl.classList.add('active');
+  setTimeout(()=>{
+    const cw=document.getElementById('cw');
+    if(cw&&hl.offsetTop)cw.scrollTop=hl.offsetTop-cw.clientHeight/3;
+  },80);
+}
+
+function _clearHL(){
+  const hl=document.getElementById('hl');
+  if(hl){hl.classList.remove('active');hl.style.display='none';}
+}
+
+function _setTitle(t){
+  document.title=t+' — PDF';
+  const el=document.getElementById('tt');
+  if(el)el.textContent=t;
+}
+
+// 부모 창 닫힘 감지
+setInterval(()=>{if(!window.opener||window.opener.closed)document.title='[연결 끊김] '+document.title;},3000);
+</script></body></html>`;
+
+  _pdfWin.document.open();
+  _pdfWin.document.write(html);
+  _pdfWin.document.close();
+
+  // PDF.js 문서가 이미 로드되어 있으면 바로 전달
+  // 아직 없으면 로드 후 전달
+  const _sendDoc=()=>{
+    if(_pdfDoc && _pdfWin && !_pdfWin.closed){
+      try{ _pdfWin.init(_pdfDoc, _pdfPage, pc); }
+      catch(e){ console.warn('PDF 별도 창 init 실패:', e); }
+    }
+  };
+  if(_pdfDoc){
+    setTimeout(_sendDoc, 200); // DOM 렌더 대기
+  } else {
+    // PDF 아직 로딩 중 → pdfRenderPage 완료 후 전달
+    const _waitDoc=setInterval(()=>{
+      if(_pdfDoc){clearInterval(_waitDoc);_sendDoc();}
+    }, 300);
+    setTimeout(()=>clearInterval(_waitDoc), 30000); // 30초 안전 타임아웃
+  }
+
+  // 확대 모드 종료
+  if(_pdfExpanded){_pdfExpanded=false;_pdfZoom=100;}
+  R();
+}
+
+// ★ 별도 창에 Notice 변경 전달 (viewNotice에서 호출)
+async function _pdfWinSyncNotice(){
+  if(!_pdfWinIsOpen()) return;
+  const n=S.notices.find(x=>x.id===S.activeNoticeId);
+  if(!n) return;
+  const targetId=n.id;
+  const pc=n.page_count||1;
+  try{
+    _pdfWin._setTitle(n.header.notice_title||'Notice');
+    // _pdfDoc이 이미 현재 notice면 바로 전달
+    if(_pdfDoc && _pdfDoc._noticeId===targetId){
+      _pdfWin.init(_pdfDoc, 1, pc);
+      return;
+    }
+    // 아니면 직접 로드 (메인 패널이 렌더하지 않으므로)
+    await window._pdfjsReady;
+    const cached=_pdfCacheGet(targetId);
+    if(cached){
+      _pdfDoc=cached;_pdfDoc._noticeId=targetId;
+      _pdfWin.init(_pdfDoc, 1, pc);
+      return;
+    }
+    let buf=await _idbGet(targetId);
+    if(!buf) buf=await _fetchPdfBytes(targetId);
+    if(!_pdfWinIsOpen()) return; // 로딩 중 창 닫힘
+    _pdfDoc=await pdfjsLib.getDocument({data:buf}).promise;
+    _pdfDoc._noticeId=targetId;
+    _pdfCacheSet(targetId, _pdfDoc);
+    _idbSet(targetId, buf);
+    if(_pdfWinIsOpen()) _pdfWin.init(_pdfDoc, 1, pc);
+  }catch(e){ console.warn('PDF 별도 창 sync 실패:', e); }
+}
+
 function highlightPdfItem(itemIdx){
   const n=S.notices.find(x=>x.id===S.activeNoticeId);
   if(!n) return;
@@ -2952,6 +3163,12 @@ function highlightPdfItem(itemIdx){
   if(!it||!it._pdf_loc) return;
   if(it._pdf_loc.match_score<60) return;
   const loc=it._pdf_loc;
+
+  // ★ 별도 창이 열려 있으면 자식 창으로 하이라이트 전달
+  if(_pdfWinIsOpen()){
+    try{ _pdfWin._applyHL(loc); }catch(e){}
+    return;
+  }
 
   // Don't auto-switch away from ILPA or Q&A — only activate if already on PDF
   if(S.rightPanel!=='pdf') return;
@@ -2997,6 +3214,8 @@ function _positionHL(loc,hl){
 function clearPdfHL(){
   const hl=document.getElementById('pdfHL');
   if(hl){hl.classList.remove('active');hl.style.display='none';}
+  // ★ 별도 창 하이라이트도 클리어
+  if(_pdfWinIsOpen()){ try{ _pdfWin._clearHL(); }catch(e){} }
 }
 
 /* ===== RIGHT PANEL: AI Q&A ===== */
@@ -4823,6 +5042,20 @@ function makeFundIdKey(name){
 /* Get the Fund grouping key: Fund_ID_Key (AI/server) → fallback to normalizeFundName */
 function getFundKey(header){
   return header.Fund_ID_Key||normalizeFundName(header.Underlying_Fund_Name_full)||header.Underlying_Fund_Name_full||'';
+}
+// ★ Investment_Class 정규화 — "CLASS A NOTE" → "Class A Note" (대소문자 통일)
+function _normInvClass(raw){
+  if(!raw||raw==='N/A') return 'LP Interest';
+  let s=raw.trim().toLowerCase().replace(/\b\w/g,c=>c.toUpperCase());
+  // "Lp" → "LP" 보존 (약어)
+  s=s.replace(/\bLp\b/g,'LP');
+  return s;
+}
+// ★ LP명에서 Class 접미사 제거 — "(Class A)", "(Class B)", "(LP Interest)" 등
+// "(H)"같은 중간 괄호는 유지하고, 마지막 Class 관련 괄호만 제거
+function _stripClassSuffix(s){
+  if(!s) return s;
+  return s.replace(/\s*\((?:Class\s+[A-Za-z](?:\s+Note)?|LP\s+Interest|[A-Za-z\s]*Note\s*[A-Za-z]?)\)\s*$/i, '').trim();
 }
 function normalizeLpName(name){
   if(!name||name==='N/A') return '';
