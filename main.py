@@ -2962,6 +2962,7 @@ _BDR_TOP_DBL = Border(top=Side('double', color='FF000000'))
 _NUM = '#,##0.00'
 _NUM_ACCT = '#,##0.00_);(#,##0.00)'
 _PCT = '0.0%'
+_PCT_DETAIL = '0.0000%'  # LP Interest 같은 소수점 이하 상세 %
 _DATE = 'YYYY-MM-DD'
 
 
@@ -3006,8 +3007,9 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
     h = notice['header']
     items = [it for it in notice.get('line_items', []) if not it.get('is_subtotal')]
 
-    # Title row (merged)
+    # Title row (merged) — Fund + Type + Issue Date
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=5)
+    issue_dt = (h.get('issue_date', '') or '')[:10]
     title_cell = ws.cell(row=1, column=1,
         value=f"{h.get('Underlying_Fund_Name_full', '')} — {h.get('notice_type', '')} Notice")
     title_cell.font = _FNT_TITLE
@@ -3017,8 +3019,14 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
         ws.cell(row=1, column=c).fill = _FILL_NAVY
     ws.row_dimensions[1].height = 30
 
+    # Subtitle row — dates
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=5)
+    due_dt = (h.get('due_date', '') or '')[:10]
+    ws.cell(row=2, column=1,
+        value=f"Issue: {issue_dt}  ·  Due: {due_dt}").font = Font(name='Calibri', size=9, color='FF6B7280')
+
     # Header info
-    r = 3
+    r = 4
     info_fields = [
         ('Fund Name', h.get('Underlying_Fund_Name_full', '')),
         ('Notice Title', h.get('notice_title', '')),
@@ -3028,17 +3036,19 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
         ('LP Name', h.get('LP_Name_full', '')),
         ('LP Code', h.get('LP_code', '')),
         ('Commitment', _pn(h.get('Commitment_original'))),
-        ('LP Interest %', (_pn(h.get('pct_LP_Interest')) or 0) / 100 if _pn(h.get('pct_LP_Interest')) else None),
+        ('LP Interest %', _pn(h.get('pct_LP_Interest'))),
     ]
     for label, val in info_fields:
         ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
         ws.cell(row=r, column=1).fill = _FILL_GRAY
+        ws.cell(row=r, column=1).border = _BDR_THIN
         cell = ws.cell(row=r, column=2, value=val)
         cell.font = _FNT_NORM
+        cell.border = _BDR_THIN
         if isinstance(val, (int, float)) and val and label == 'Commitment':
             cell.number_format = _NUM
         elif label == 'LP Interest %' and val is not None:
-            cell.number_format = _PCT
+            cell.number_format = _PCT_DETAIL
         elif isinstance(val, dt_date):
             cell.number_format = _DATE
         r += 1
@@ -3054,8 +3064,11 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
     for label, key in [('Unfunded Commitment', 'Unfunded_prior'), ('Cumul. Contributions', 'CumContribPrior'), ('Cumul. Distributions', 'CumDistribPrior')]:
         ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
         ws.cell(row=r, column=1).fill = _FILL_GRAY
-        cell = ws.cell(row=r, column=2, value=_pn(h.get(key)))
+        ws.cell(row=r, column=1).border = _BDR_THIN
+        val = _pn(h.get(key))
+        cell = ws.cell(row=r, column=2, value=round(val, 2) if val is not None else None)
         cell.number_format = _NUM_ACCT
+        cell.border = _BDR_THIN
         r += 1
 
     # Section: Current
@@ -3069,8 +3082,11 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
     for label, key in [('Current Contributions', 'Current_Commit_Contribution'), ('Current Distributions', 'Current_Commit_Distribution'), ('LP Net Amount', 'LP_net_amount')]:
         ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
         ws.cell(row=r, column=1).fill = _FILL_GRAY
-        cell = ws.cell(row=r, column=2, value=_pn(h.get(key)))
+        ws.cell(row=r, column=1).border = _BDR_THIN
+        val = _pn(h.get(key))
+        cell = ws.cell(row=r, column=2, value=round(val, 2) if val is not None else None)
         cell.number_format = _NUM_ACCT
+        cell.border = _BDR_THIN
         if label == 'LP Net Amount':
             cell.font = _FNT_BOLD
         r += 1
@@ -3086,8 +3102,11 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
     for label, key in [('Unfunded Commitment', 'Unfunded_after'), ('Cumul. Contributions', 'CumContribAfter'), ('Cumul. Distributions', 'CumDistribAfter')]:
         ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
         ws.cell(row=r, column=1).fill = _FILL_GRAY
-        cell = ws.cell(row=r, column=2, value=_pn(h.get(key)))
+        ws.cell(row=r, column=1).border = _BDR_THIN
+        val = _pn(h.get(key))
+        cell = ws.cell(row=r, column=2, value=round(val, 2) if val is not None else None)
         cell.number_format = _NUM_ACCT
+        cell.border = _BDR_THIN
         r += 1
 
     # Line Items
@@ -3112,14 +3131,16 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
     for idx, it in enumerate(items):
         ws.cell(row=r, column=1, value=idx + 1).font = _FNT_NORM
         ws.cell(row=r, column=2, value=it.get('item_name', '')).font = _FNT_NORM
-        amt_cell = ws.cell(row=r, column=3, value=_pn(it.get('LP_signed_amount')))
+        amt = _pn(it.get('LP_signed_amount'))
+        amt_cell = ws.cell(row=r, column=3, value=round(amt, 2) if amt is not None else None)
         amt_cell.number_format = _NUM_ACCT
         amt_cell.alignment = _ALIGN_R
         ws.cell(row=r, column=4, value='Call' if it.get('Transaction_type') == 'call' else 'Dist').alignment = _ALIGN_C
         ws.cell(row=r, column=5, value='Yes' if it.get('Commitment_affecting') else 'No').alignment = _ALIGN_C
-        # Alternate row shading
-        if idx % 2 == 1:
-            for c in range(1, 6):
+        # Thin bottom border + alternate row shading
+        for c in range(1, 6):
+            ws.cell(row=r, column=c).border = _BDR_THIN
+            if idx % 2 == 1:
                 ws.cell(row=r, column=c).fill = _FILL_GRAY
         r += 1
     item_end = r - 1
@@ -3331,8 +3352,8 @@ def _xs_commitment_sheet(wb, notices, current_id):
         is_cur = (n['id'] == current_id)
         uf_prior = _pn(hh.get('Unfunded_prior'))
         uf_after = _pn(hh.get('Unfunded_after'))
-        funded_prior = (commit - uf_prior) if commit and uf_prior is not None else None
-        funded_after = (commit - uf_after) if commit and uf_after is not None else None
+        funded_prior = round(commit - uf_prior, 2) if commit and uf_prior is not None else None
+        funded_after = round(commit - uf_after, 2) if commit and uf_after is not None else None
         pct = (1 - uf_after / commit) if commit and uf_after is not None else None
         delta = (pct - prev_pct) if pct is not None and prev_pct is not None else (pct if pct is not None and i == 0 else None)
 
@@ -3351,11 +3372,11 @@ def _xs_commitment_sheet(wb, notices, current_id):
         ws.cell(row=r, column=3, value=hh.get('notice_type', '')).alignment = _ALIGN_C
         ws.cell(row=r, column=4, value=funded_prior).number_format = _NUM_ACCT
         ws.cell(row=r, column=4).alignment = _ALIGN_R
-        ws.cell(row=r, column=5, value=round(ca, 2) if ca else 0).number_format = _NUM_ACCT
+        ws.cell(row=r, column=5, value=round(ca, 2)).number_format = _NUM_ACCT
         ws.cell(row=r, column=5).alignment = _ALIGN_R
         ws.cell(row=r, column=6, value=funded_after).number_format = _NUM_ACCT
         ws.cell(row=r, column=6).alignment = _ALIGN_R
-        ws.cell(row=r, column=7, value=uf_after).number_format = _NUM_ACCT
+        ws.cell(row=r, column=7, value=round(uf_after, 2) if uf_after is not None else None).number_format = _NUM_ACCT
         ws.cell(row=r, column=7).alignment = _ALIGN_R
         c_pct = ws.cell(row=r, column=8, value=pct)
         c_pct.number_format = _PCT
@@ -3365,9 +3386,10 @@ def _xs_commitment_sheet(wb, notices, current_id):
         c_delta.number_format = '+0.0%;-0.0%'
         c_delta.alignment = _ALIGN_R
 
-        # Highlight current notice
-        if is_cur:
-            for c in range(1, 10):
+        # Thin borders + highlight current notice
+        for c in range(1, 10):
+            ws.cell(row=r, column=c).border = _BDR_THIN
+            if is_cur:
                 ws.cell(row=r, column=c).fill = _FILL_CUR
                 if c in (1, 2, 3): ws.cell(row=r, column=c).font = _FNT_BOLD
 
@@ -3457,6 +3479,9 @@ def _xs_exposure_sheet(wb, notices, current_id, asset_groups=None):
             ws.cell(row=r, column=last_col,
                 value=f'=SUM({first_data_col}{r}:{last_data_col}{r})').number_format = _NUM_ACCT
             ws.cell(row=r, column=last_col).alignment = _ALIGN_R
+            # Thin border on all cells
+            for ci in range(1, last_col + 1):
+                ws.cell(row=r, column=ci).border = _BDR_THIN
             r += 1
 
         # Subtotal row (only if >1 raw names)
