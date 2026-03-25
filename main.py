@@ -820,6 +820,9 @@ def post_process(parsed: dict) -> tuple:
     # Validate wire entity separation (detect cross-entity contamination)
     _validate_header_wire(header)
 
+    # Normalize: promote lone beneficiary → beneficiary_bank
+    _normalize_header_wire_beneficiary(header)
+
     # Distribution notice: if due_date missing, copy from issue_date
     net = _pn(header.get("LP_net_amount"))
     if net is not None and net < 0:
@@ -1255,6 +1258,65 @@ def _validate_header_wire(header: dict) -> dict:
     wires = header.get("wire_info", [])
     if wires and isinstance(wires, list):
         header["wire_info"] = [_validate_wire_entities(w) for w in wires]
+    return header
+
+
+# ── Wire Beneficiary Normalization ───────────────────────
+# GP마다 beneficiary_bank vs beneficiary 필드 사용이 혼재됨.
+# beneficiary_bank이 비어있고 beneficiary만 있으면 → beneficiary_bank으로 승격
+# 둘 다 있으면 → 그대로 유지 (정상 3-entity 구조)
+def _normalize_wire_beneficiary(wire: dict) -> dict:
+    """Promote beneficiary fields to beneficiary_bank when bank fields are empty."""
+    if not wire or not isinstance(wire, dict):
+        return wire
+
+    def _has_val(key):
+        v = (wire.get(key) or "").strip()
+        return v and v != "N/A"
+
+    # Check if beneficiary_bank has meaningful data
+    bank_has_data = any(_has_val(f) for f in [
+        "beneficiary_bank_name", "beneficiary_bank_swift_code",
+        "beneficiary_bank_aba_routing", "beneficiary_bank_account_number"
+    ])
+    # Check if beneficiary (non-bank) has meaningful data
+    benef_has_data = any(_has_val(f) for f in [
+        "beneficiary_name", "beneficiary_account_number"
+    ])
+
+    # Only promote if bank is empty and beneficiary has data
+    if not bank_has_data and benef_has_data:
+        promote_map = {
+            "beneficiary_name": "beneficiary_bank_name",
+            "beneficiary_account_number": "beneficiary_bank_account_number",
+        }
+        for src, dst in promote_map.items():
+            if _has_val(src) and not _has_val(dst):
+                wire[dst] = wire[src]
+                wire[src] = ""
+                print(f"  [WIRE NORMALIZE] Promoted {src} → {dst}: {wire[dst][:30]}")
+
+        # Also check beneficiary_swift_code (legacy field) → beneficiary_bank_swift_code
+        if _has_val("beneficiary_swift_code") and not _has_val("beneficiary_bank_swift_code"):
+            wire["beneficiary_bank_swift_code"] = wire["beneficiary_swift_code"]
+            wire["beneficiary_swift_code"] = ""
+        # Also check beneficiary_aba_routing → beneficiary_bank_aba_routing
+        if _has_val("beneficiary_aba_routing") and not _has_val("beneficiary_bank_aba_routing"):
+            wire["beneficiary_bank_aba_routing"] = wire["beneficiary_aba_routing"]
+            wire["beneficiary_aba_routing"] = ""
+        # Promote beneficiary_bank_address if available
+        if _has_val("beneficiary_address") and not _has_val("beneficiary_bank_address"):
+            wire["beneficiary_bank_address"] = wire.get("beneficiary_address", "")
+            wire["beneficiary_address"] = ""
+
+    return wire
+
+
+def _normalize_header_wire_beneficiary(header: dict) -> dict:
+    """Apply beneficiary normalization to all wire_info entries."""
+    wires = header.get("wire_info", [])
+    if wires and isinstance(wires, list):
+        header["wire_info"] = [_normalize_wire_beneficiary(w) for w in wires]
     return header
 
 
@@ -1999,6 +2061,7 @@ async def list_notices(request: Request, org_id: Optional[str] = Query(None)):
     for r in rows:
         header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
         _migrate_header_wire(header)
+        _normalize_header_wire_beneficiary(header)
         line_items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
         result.append({
             "id": r["id"], "fileName": r.get("file_name",""), "analyzedAt": r.get("analyzed_at"),
@@ -2018,6 +2081,7 @@ async def get_notice(notice_id: str, request: Request):
         raise HTTPException(404, "Notice not found")
     header = r["header"] if isinstance(r["header"], dict) else json.loads(r["header"] or "{}")
     _migrate_header_wire(header)
+    _normalize_header_wire_beneficiary(header)
     line_items = r["line_items"] if isinstance(r["line_items"], list) else json.loads(r["line_items"] or "[]")
     return {
         "id": r["id"], "fileName": r.get("file_name",""), "analyzedAt": r.get("analyzed_at"),

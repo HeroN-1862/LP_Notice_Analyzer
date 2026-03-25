@@ -347,20 +347,10 @@ details>summary{list-style:none}details>summary::-webkit-details-marker{display:
   .main{margin-left:48px}.pg-h,.pg-b{padding-left:12px;padding-right:12px}
   .dg{grid-template-columns:1fr 1fr}.sum-row{grid-template-columns:1fr 1fr}
 }
-/* Commitment Tab */
-.cmit-chev{min-width:72px;padding:8px 10px;border-radius:var(--r);cursor:pointer;text-align:center;font-size:11px;transition:all .15s;flex-shrink:0}
-.cmit-chev:hover{transform:translateY(-1px);box-shadow:0 2px 6px rgba(0,0,0,.08)}
-.cmit-call{background:rgba(29,53,87,.06);border:1px solid rgba(29,53,87,.15)}
-.cmit-dist{background:rgba(78,154,109,.06);border:1px solid rgba(78,154,109,.15)}
-.cmit-adj{background:rgba(217,119,6,.06);border:1px solid rgba(217,119,6,.15)}
-.cmit-cur{border-bottom:2.5px solid var(--blue);background:rgba(45,127,249,.06)!important}
-.cmit-void{opacity:.4;text-decoration:line-through}
-.cmit-arrow{font-size:14px;font-weight:700;line-height:1}
-.cmit-call .cmit-arrow{color:var(--indigo)}.cmit-dist .cmit-arrow{color:var(--emerald)}.cmit-adj .cmit-arrow{color:var(--amber)}
-.cmit-amt{font-family:var(--f);font-weight:600;color:var(--t1);margin:2px 0;font-size:11px}
-.cmit-delta{font-weight:600;font-size:10px}
-.cmit-date{color:var(--t3);font-size:10px;margin-top:2px}
-.cmit-conn{color:var(--bdr2);font-size:10px;padding:0 2px;flex-shrink:0;display:flex;align-items:center}
+/* Commitment Tab — Tick Labels */
+.cmit-tick{position:absolute;transform:translateX(-50%);text-align:center;cursor:default}
+.cmit-tick-label{font-size:9px;font-variant-numeric:tabular-nums;line-height:1.25;white-space:nowrap;transition:all .15s}
+.cmit-tick-label-stagger{margin-top:-14px}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -537,6 +527,8 @@ async function loadFromBackend(){
     S.notices=data;
     // Store org_id for admin org assignment
     S.notices.forEach(n=>{ n._raw_org_id = n.org_id || ''; });
+    // Wire beneficiary 정규화 (beneficiary만 있으면 → beneficiary_bank 승격)
+    S.notices.forEach(n=>{(n.header.wire_info||[]).forEach(w=>_normalizeWireBeneficiary(w));});
     if(S.notices.length) S.page='portfolio';
     // Rebuild name registry + derive missing fields (2-pass: cross-ref needs all notices loaded first)
     S.notices.forEach(n=>{normalizeNames(n.header);deriveHeaderFields(n.header);});
@@ -1147,6 +1139,7 @@ async function adminFilterOrg(orgId){
     if(r.ok){
       S.notices=await r.json();
       S.notices.forEach(n=>{ n._raw_org_id = n.org_id || ''; });
+      S.notices.forEach(n=>{(n.header.wire_info||[]).forEach(w=>_normalizeWireBeneficiary(w));});
       S.notices.forEach(n=>{normalizeNames(n.header);deriveHeaderFields(n.header);});
     }
   }catch(e){}
@@ -2352,7 +2345,7 @@ function renderResultPG(hEl,bEl){
           <div class="result-tab ${S.resultTab==='exposure'?'act':''}" onclick="S.resultTab='exposure';S.rightPanel='hide';R()">Exposure</div>
           <div class="result-tab ${S.resultTab==='commitment'?'act':''}" onclick="S.resultTab='commitment';S.rightPanel='hide';R()">Commitment</div>
           <div style="flex:1"></div>
-          <div class="result-tab" onclick="openExportPopup()" style="font-size:11px;gap:3px;color:var(--t3)" title="Excel/CSV 내보내기">📥 Export</div>
+          <div onclick="openExportPopup()" style="padding:5px 14px;font-size:11px;font-weight:600;background:var(--indigo-d);color:var(--indigo);border:1px solid rgba(29,53,87,.2);border-radius:5px;cursor:pointer;white-space:nowrap;transition:all .15s;display:flex;align-items:center" onmouseover="this.style.background='var(--indigo)';this.style.color='#fff'" onmouseout="this.style.background='var(--indigo-d)';this.style.color='var(--indigo)'" title="Excel/CSV 내보내기">Export to Excel</div>
         </div>
         ${S.resultTab==='wire'?rWireInfo(n):S.resultTab==='exposure'?rExposure(n):S.resultTab==='commitment'?rCommitment(n):`
         ${rDashboard(h,items)}
@@ -3256,7 +3249,13 @@ function rWireInfo(n){
       ${consistency.status==='match'?`<div class="al info" style="margin-bottom:14px"><span class="ai">✓</span><div>이전 Notice와 Wire Info 동일</div></div>`:''}
       ${consistency.status==='first'?`<div class="al info" style="margin-bottom:14px"><span class="ai">ℹ</span><div>이 Fund의 첫 번째 ${direction==='outbound'?'Outbound':'Inbound'} Wire 정보입니다 (비교 대상 없음)</div></div>`:''}
 
-      ${wire?`
+      ${wire?(()=>{
+        const _bName=wire.beneficiary_name||wire.beneficiary_account_name||'';
+        const _bAcct=wire.beneficiary_account_number||'';
+        const _bRef=wire.reference||'';
+        const _bFC=wire.further_credit||'';
+        const _hasBenef=(_bName&&_bName!=='N/A')||(_bAcct&&_bAcct!=='N/A')||(_bRef&&_bRef!=='N/A')||(_bFC&&_bFC!=='N/A');
+        return`
         <div class="wire-card">
           <div class="wc-title">Beneficiary Bank (수익자 은행) <span style="font-size:9px;color:var(--teal);font-weight:400;margin-left:6px">● 핵심 비교 대상</span></div>
           ${wr('Bank',wire.beneficiary_bank_name)}
@@ -3265,13 +3264,17 @@ function rWireInfo(n){
           ${wr('ABA Routing',wire.beneficiary_bank_aba_routing||wire.beneficiary_aba_routing,'beneficiary_bank_aba_routing')}
           ${wr('Account #',wire.beneficiary_bank_account_number,'beneficiary_bank_account_number')}
         </div>
-        <div class="wire-card">
+        ${_hasBenef?`<div class="wire-card">
           <div class="wc-title">Beneficiary (수익자)</div>
           ${wr('Name',wire.beneficiary_name||wire.beneficiary_account_name)}
           ${wr('Account #',wire.beneficiary_account_number,'beneficiary_account_number')}
           ${wr('Reference',wire.reference)}
           ${wr('Further Credit',wire.further_credit)}
-        </div>
+        </div>`:`${wire.reference||wire.further_credit?`<div class="wire-card">
+          <div class="wc-title">추가 정보</div>
+          ${wr('Reference',wire.reference)}
+          ${wr('Further Credit',wire.further_credit)}
+        </div>`:''}`}
         ${wire.intermediary_bank_name||wire.intermediary_swift_code?`
         <div class="wire-card">
           <div class="wc-title">Intermediary Bank (중개은행) <span style="font-size:9px;color:var(--t3);font-weight:400;margin-left:6px">경로 변경은 일반적으로 무해</span></div>
@@ -3279,8 +3282,7 @@ function rWireInfo(n){
           ${wr('Address',wire.intermediary_bank_address)}
           ${wr('SWIFT / BIC',wire.intermediary_swift_code,'intermediary_swift_code')}
           ${wr('Account #',wire.intermediary_account_number,'intermediary_account_number')}
-        </div>`:''}
-      `:`<div style="padding:30px 20px;text-align:center;color:var(--t3);background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--r)">
+        </div>`:''}`})():`<div style="padding:30px 20px;text-align:center;color:var(--t3);background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--r)">
         <div style="font-size:14px;margin-bottom:6px">Wire 정보 없음</div>
         <div style="font-size:12px">이 Notice에는 송금 지시가 포함되어 있지 않습니다.${direction==='inbound'?'<br>Distribution Notice는 별도 Wire 정보가 없는 경우가 일반적입니다.':''}</div>
       </div>`}
@@ -3705,68 +3707,74 @@ function rCommitment(n){
     </div>
   </div>`;
 
-  // ── SECTION B: Progress Bar + Tick Marks + Chevron Timeline ──
+  // ── SECTION B: Progress Bar + Tick Marks with Labels + Dashed Lines ──
   const barPct=latestPct!=null?Math.min(Math.max(latestPct,0),100):0;
 
-  // Tick marks
+  // Stagger 계산: 인접 tick 간 소진율 차이 작으면 라벨 교대 배치
+  const MIN_GAP=5; // 최소 5% 간격
+  let hasStagger=false;
+  const pctVals=rows.filter(r=>r.pct!=null).map(r=>r.pct);
+  const pctRange=pctVals.length>=2?Math.max(...pctVals)-Math.min(...pctVals):100;
+  const ultraDense=rows.length>=10&&pctRange<20; // 극밀집 모드
+  rows.forEach((r,i)=>{
+    if(i===0||r.pct==null){r._stagger=0;return;}
+    let prevPct=null;
+    for(let j=i-1;j>=0;j--){if(rows[j].pct!=null){prevPct=rows[j].pct;break;}}
+    if(prevPct!=null&&Math.abs(r.pct-prevPct)<MIN_GAP){
+      r._stagger=(rows[i-1]._stagger||0)===0?1:0;
+      hasStagger=true;
+    } else { r._stagger=0; }
+  });
+
+  // tick 라벨 영역 높이: 기본 40px, stagger 있으면 54px
+  const tickH=hasStagger?54:40;
+
+  // Tick marks with labels
   let ticksHtml='';
   rows.forEach((r,i)=>{
     if(r.pct==null) return;
     const left=Math.min(Math.max(r.pct,0),100);
-    const col=r.isCurrent?'var(--blue)':r.type==='Call'?'var(--indigo)':r.type==='Distribution'?'var(--emerald)':'var(--amber)';
-    const sz=r.isCurrent?'8px':'6px';
+    // 원래 type 색 유지 (현재 notice도 blue 아닌 원래 색)
+    const col=r.type==='Call'?'var(--indigo)':r.type==='Distribution'?'var(--emerald)':'var(--amber)';
+    const sz=r.isCurrent?'7px':'5px';
     const tipType=r.type==='Call'?'Call':r.type==='Distribution'?'Dist':'Adj';
     const tipAmt=r.caAmount!=null?fA(Math.abs(r.caAmount)):'';
-    ticksHtml+=`<div style="position:absolute;left:${left}%;transform:translateX(-50%);text-align:center;cursor:default" title="${tipType} #${r.idx}: ${r.caAmount>=0?'+':''}${tipAmt} (${r.date})">
-      <div style="width:0;height:0;border-left:${sz} solid transparent;border-right:${sz} solid transparent;border-top:${sz} solid ${col};margin:0 auto"></div>
+    const stgCls=r._stagger?'cmit-tick-label-stagger':'';
+    // 극밀집: #번호만, 정상: #번호 + 소진율
+    const labelContent=ultraDense
+      ?`<div>#${r.idx}</div>`
+      :`<div>#${r.idx}</div><div>${r.pct.toFixed(1)}%</div>`;
+    ticksHtml+=`<div class="cmit-tick" style="left:${left}%;bottom:0;z-index:${r.isCurrent?2:1}" title="${tipType} #${r.idx}: ${r.pct.toFixed(1)}% (${r.date})">
+      <div class="cmit-tick-label ${stgCls}" style="color:${r.isCurrent?col:'var(--t3)'};font-weight:${r.isCurrent?'700':'400'}">${labelContent}</div>
+      <div style="width:0;height:0;border-left:${sz} solid transparent;border-right:${sz} solid transparent;border-top:${sz} solid ${col};margin:2px auto 0"></div>
     </div>`;
   });
 
-  // Chevron timeline
-  const maxDelta=Math.max(...rows.map(r=>Math.abs(r.caAmount||0)),1);
-  let chevHtml='';
-  rows.forEach((r,i)=>{
-    const w=Math.round(72+(Math.abs(r.caAmount||0)/maxDelta)*88);
-    const cls=r.type==='Call'?'cmit-call':r.type==='Distribution'?'cmit-dist':'cmit-adj';
-    const arrow=r.type==='Distribution'?'◄':'►';
-    const dCol=r.deltaPct!=null?(r.deltaPct>=0?'color:var(--indigo)':'color:var(--emerald)'):'color:var(--t3)';
-    const dSign=r.deltaPct!=null&&r.deltaPct>=0?'+':'';
-    const dText=r.deltaPct!=null?`${dSign}${r.deltaPct.toFixed(1)}%`:'—';
-    const typeBadge=r.type==='Call'?'tg-c':r.type==='Distribution'?'tg-d':'tg-a';
-    if(i>0) chevHtml+=`<div class="cmit-conn">──▶</div>`;
-    chevHtml+=`<div class="cmit-chev ${cls} ${r.isCurrent?'cmit-cur':''}" style="width:${w}px" onclick="viewNotice('${r.notice.id}')" id="cmit-chev-${i}">
-      <div class="cmit-arrow">${arrow}</div>
-      <div class="cmit-amt">${fA(Math.abs(r.caAmount||0))}</div>
-      <div class="cmit-delta" style="${dCol}">${dText}</div>
-      <div style="margin:2px 0"><span class="tg ${typeBadge}" style="font-size:9px;padding:1px 5px;border-radius:6px">${r.type==='Call'?'Call':r.type==='Distribution'?'Dist':'Adj'}</span></div>
-      <div class="cmit-date">${r.date?r.date.substring(2):''}</div>
-    </div>`;
+  // Dashed lines overlay (bar 관통 점선)
+  let dashHtml='';
+  rows.forEach(r=>{
+    if(r.pct==null) return;
+    const left=Math.min(Math.max(r.pct,0),100);
+    const col=r.type==='Call'?'var(--indigo)':r.type==='Distribution'?'var(--emerald)':'var(--amber)';
+    dashHtml+=`<div style="position:absolute;left:${left}%;top:0;width:0;height:100%;border-left:1px dashed ${r.isCurrent?col:'var(--bdr2)'};opacity:${r.isCurrent?'0.7':'0.25'};transform:translateX(0px)"></div>`;
   });
-
-  // Find current index for scrollIntoView
-  const curIdx=rows.findIndex(r=>r.isCurrent);
 
   const secB=`<div class="sec" style="margin-bottom:16px">
     <div class="sh"><div class="st">소진 흐름</div></div>
     <div style="position:relative;margin-bottom:16px">
-      <div style="position:relative;height:14px;margin-bottom:2px">${ticksHtml}</div>
-      <div style="height:28px;background:var(--bg4);border-radius:6px;overflow:hidden;position:relative">
-        <div style="width:${barPct}%;height:100%;background:var(--indigo);border-radius:${barPct>=100?'6px':'6px 0 0 6px'};transition:width .3s"></div>
+      <div style="position:relative;height:${tickH}px;margin-bottom:0">${ticksHtml}</div>
+      <div style="position:relative">
+        <div style="height:28px;background:var(--bg4);border-radius:6px;overflow:hidden">
+          <div style="width:${barPct}%;height:100%;background:var(--indigo);border-radius:${barPct>=100?'6px':'6px 0 0 6px'};transition:width .3s"></div>
+        </div>
+        <div style="position:absolute;top:0;left:0;right:0;height:28px;pointer-events:none">${dashHtml}</div>
       </div>
-      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px">
+      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px;font-variant-numeric:tabular-nums">
         <span style="color:var(--indigo);font-weight:600">Funded: ${fA(latestFunded)} (${barPct.toFixed(1)}%)</span>
         <span style="color:var(--t3)">Unfunded: ${fA(latestUnf)} (${latestPct!=null?(100-latestPct).toFixed(1)+'%':''})</span>
       </div>
     </div>
-    <div id="cmitTimeline" style="overflow-x:auto;padding:8px 0">
-      <div style="display:flex;align-items:center;min-width:fit-content;gap:0">
-        ${chevHtml}
-      </div>
-    </div>
   </div>`;
-
-  // scrollIntoView for current notice chevron
-  if(curIdx>=0) setTimeout(()=>{const el=document.getElementById('cmit-chev-'+curIdx);if(el)el.scrollIntoView({inline:'center',behavior:'smooth',block:'nearest'});},100);
 
   // ── SECTION C: Detail Table ──
   let tRows='';
@@ -3778,22 +3786,22 @@ function rCommitment(n){
     const dSign=r.deltaPct!=null&&r.deltaPct>=0?'+':'';
     const dText=r.deltaPct!=null?`${dSign}${r.deltaPct.toFixed(1)}%`:'—';
     tRows+=`<tr style="${trStyle};cursor:pointer" onclick="viewNotice('${r.notice.id}')">
-      <td style="padding:6px 8px;font-size:11px;color:var(--t2)">${isCur?'▶ ':' '}${r.idx}</td>
-      <td style="padding:6px 8px;font-size:11px">${r.date||'N/A'}</td>
+      <td style="padding:6px 8px;font-size:11px;color:var(--t2);font-variant-numeric:tabular-nums">${isCur?'▶ ':' '}${r.idx}</td>
+      <td style="padding:6px 8px;font-size:11px;font-variant-numeric:tabular-nums">${r.date||'N/A'}</td>
       <td style="padding:6px 8px"><span class="tg ${typeBadge}" style="font-size:10px;padding:1px 6px;border-radius:6px">${r.type==='Call'?'Call':r.type==='Distribution'?'Dist':'Adj'}</span></td>
-      <td style="padding:6px 8px;text-align:right;font-size:12px">${fA(r.unfPrior)}</td>
-      <td style="padding:6px 8px;text-align:right;font-size:12px">${fA(r.caAmount,true)}</td>
-      <td style="padding:6px 8px;text-align:right;font-size:12px">${fA(r.unfAfter)}</td>
-      <td style="padding:6px 8px;text-align:right;font-size:12px">${fA(r.funded)}</td>
-      <td style="padding:6px 8px;text-align:right;font-size:12px;font-weight:600">${r.pct!=null?r.pct.toFixed(1)+'%':'—'}</td>
-      <td style="padding:6px 8px;text-align:right;font-size:11px;font-weight:600;color:${dCol}">${dText}</td>
+      <td class="amt" style="padding:6px 8px;font-size:12px">${fA(r.unfPrior)}</td>
+      <td class="amt" style="padding:6px 8px;font-size:12px">${fA(r.caAmount,true)}</td>
+      <td class="amt" style="padding:6px 8px;font-size:12px">${fA(r.unfAfter)}</td>
+      <td class="amt" style="padding:6px 8px;font-size:12px">${fA(r.funded)}</td>
+      <td class="amt" style="padding:6px 8px;font-size:12px;font-weight:600">${r.pct!=null?r.pct.toFixed(1)+'%':'—'}</td>
+      <td class="amt" style="padding:6px 8px;font-size:11px;font-weight:600;color:${dCol}">${dText}</td>
     </tr>`;
   });
 
   const secC=`<div class="sec" style="margin-bottom:16px">
     <div class="sh"><div class="st">Notice별 상세</div></div>
     <div style="overflow-x:auto">
-      <table style="width:100%;border-collapse:collapse;font-size:12px;min-width:700px">
+      <table class="it" style="width:100%;font-size:12px;min-width:700px">
         <thead><tr style="border-bottom:2px solid var(--bdr)">
           <th style="padding:6px 8px;text-align:left;color:var(--t3);font-size:10px;font-weight:600">#</th>
           <th style="padding:6px 8px;text-align:left;color:var(--t3);font-size:10px;font-weight:600">Date</th>
@@ -5064,6 +5072,22 @@ function normalizeNames(header){
   }
 }
 
+/* Wire Beneficiary 정규화: beneficiary_bank이 비어있고 beneficiary만 있으면 승격.
+   GP마다 같은 정보를 다른 필드에 넣는 혼재 패턴 대응. */
+function _normalizeWireBeneficiary(wire){
+  if(!wire||typeof wire!=='object') return;
+  const hv=k=>{const v=(wire[k]||'').trim();return v&&v!=='N/A';};
+  const bankHas=hv('beneficiary_bank_name')||hv('beneficiary_bank_swift_code')||hv('beneficiary_bank_aba_routing')||hv('beneficiary_bank_account_number');
+  const benefHas=hv('beneficiary_name')||hv('beneficiary_account_number');
+  // 둘 중 하나만 있으면 → beneficiary_bank으로 승격
+  if(!bankHas&&benefHas){
+    if(hv('beneficiary_name')&&!hv('beneficiary_bank_name')){wire.beneficiary_bank_name=wire.beneficiary_name;wire.beneficiary_name='';}
+    if(hv('beneficiary_account_number')&&!hv('beneficiary_bank_account_number')){wire.beneficiary_bank_account_number=wire.beneficiary_account_number;wire.beneficiary_account_number='';}
+    if(hv('beneficiary_swift_code')&&!hv('beneficiary_bank_swift_code')){wire.beneficiary_bank_swift_code=wire.beneficiary_swift_code;wire.beneficiary_swift_code='';}
+    if(hv('beneficiary_aba_routing')&&!hv('beneficiary_bank_aba_routing')){wire.beneficiary_bank_aba_routing=wire.beneficiary_aba_routing;wire.beneficiary_aba_routing='';}
+  }
+}
+
 /*
  * Extract the beneficiary (meaningful) part of an LP name.
  * "Standard Chartered Bank as Trustee of PineStreet US Infra Trust No.4" → "PineStreet US Infra Trust No.4"
@@ -5293,7 +5317,7 @@ function rExportPopup(){
   return`<div class="mo-bg" onclick="if(event.target===this){S._exportPopup=null;R();}">
     <div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:var(--rl);padding:0;width:95%;max-width:400px">
       <div style="padding:16px 20px;border-bottom:1px solid var(--bdr)">
-        <div style="font-size:15px;font-weight:700">📥 데이터 내보내기</div>
+        <div style="font-size:15px;font-weight:700">데이터 내보내기</div>
       </div>
       <div style="padding:20px">
         <div style="font-size:12px;font-weight:600;color:var(--t2);margin-bottom:8px">파일 형식</div>
@@ -5414,12 +5438,21 @@ function _exWireSheetSingle(notice){
     rows.push(['SWIFT / BIC', wire.beneficiary_bank_swift_code||wire.beneficiary_swift_code||'']);
     rows.push(['ABA Routing', wire.beneficiary_bank_aba_routing||wire.beneficiary_aba_routing||'']);
     rows.push(['Account #', wire.beneficiary_bank_account_number||'']);
-    rows.push([]);
-    rows.push(['--- Beneficiary ---']);
-    rows.push(['Name', wire.beneficiary_name||wire.beneficiary_account_name||'']);
-    rows.push(['Account #', wire.beneficiary_account_number||'']);
-    rows.push(['Reference', wire.reference||'']);
-    rows.push(['Further Credit', wire.further_credit||'']);
+    // Beneficiary 섹션: 정규화 후 데이터가 있을 때만
+    const _bn=wire.beneficiary_name||wire.beneficiary_account_name||'';
+    const _ba=wire.beneficiary_account_number||'';
+    if((_bn&&_bn!=='N/A')||(_ba&&_ba!=='N/A')){
+      rows.push([]);
+      rows.push(['--- Beneficiary ---']);
+      rows.push(['Name', _bn]);
+      rows.push(['Account #', _ba]);
+    }
+    if(wire.reference||wire.further_credit){
+      rows.push([]);
+      rows.push(['--- Additional ---']);
+      if(wire.reference) rows.push(['Reference', wire.reference]);
+      if(wire.further_credit) rows.push(['Further Credit', wire.further_credit]);
+    }
     if(wire.intermediary_bank_name||wire.intermediary_swift_code){
       rows.push([]);
       rows.push(['--- Intermediary Bank ---']);
