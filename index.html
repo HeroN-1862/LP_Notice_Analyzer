@@ -3093,7 +3093,7 @@ function _setTitle(t){
 
 // 부모 창 닫힘 감지
 setInterval(()=>{if(!window.opener||window.opener.closed)document.title='[연결 끊김] '+document.title;},3000);
-</script></body></html>`;
+` + '</' + 'script></body></html>';
 
   _pdfWin.document.open();
   _pdfWin.document.write(html);
