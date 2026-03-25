@@ -36,7 +36,7 @@
   --sw:248px;
 }
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:var(--f);background:var(--bg0);color:var(--t1);min-height:100vh;line-height:1.5;font-size:13px}
+body{font-family:var(--f);background:var(--bg0);color:var(--t1);min-height:100vh;line-height:1.5;font-size:13px;font-variant-numeric:tabular-nums}
 ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#d0d5dd;border-radius:3px}::-webkit-scrollbar-thumb:hover{background:#9ca3af}
 
 .app{display:flex;min-height:100vh}
@@ -351,6 +351,9 @@ details>summary{list-style:none}details>summary::-webkit-details-marker{display:
 .cmit-tick{position:absolute;transform:translateX(-50%);text-align:center;cursor:default}
 .cmit-tick-label{font-size:9px;font-variant-numeric:tabular-nums;line-height:1.25;white-space:nowrap;transition:all .15s}
 .cmit-tick-label-stagger{margin-top:-14px}
+/* Portfolio loading flash animation */
+@keyframes sb-flash{0%{background:var(--indigo-d);color:var(--indigo)}50%{background:var(--indigo);color:#fff}100%{background:var(--indigo-d);color:var(--indigo)}}
+.sb-flash{animation:sb-flash .6s ease 3}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -570,6 +573,9 @@ async function loadFromBackend(){
     loadAssetGroups();
     // Admin: load org list for portfolio cards + upload selector
     if(_userRole==='admin') loadAdminOrgs();
+    // Rebuild multi-LP memory from existing notices
+    // 기존 파싱된 notice에서 LP Code를 추출하여, 같은 펀드의 pending LP notice에 자동 적용
+    _rebuildMultiLpMemory();
     R();
   }catch(e){console.warn('Backend load failed:',e);R();}
 }
@@ -606,8 +612,12 @@ function clearStorage(){
   const authed = await initAuth();
   if (authed) {
     S.page = 'upload';
-    R();  // Show upload page immediately
+    S._portfolioLoading = true;
+    R();  // Show upload page with loading indicator
     await loadFromBackend();
+    S._portfolioLoading = false;
+    // Flash portfolio sidebar tab after load
+    if(S.notices.length) setTimeout(_flashPortfolioTab, 300);
   } else {
     S.page = 'login';
     R();
@@ -696,8 +706,9 @@ function renderSB(){
     <div style="padding:4px 6px 0">
       <div class="sb-gl">메뉴</div>
       <div class="sb-it ${S.page==='upload'?'act':''} ${!S.connected||_userRole==='viewer'?'dis':''}" onclick="${_userRole==='viewer'?'alert(&quot;열람 전용 계정입니다&quot;)':'go(&quot;upload&quot;)'}" ${_userRole==='viewer'?'title="열람 전용 계정"':''}><span class="ic">+</span><span>PDF 업로드</span>${uploadBadge}</div>
-      <div class="sb-it ${S.page==='portfolio'?'act':''} ${!notices.length&&_userRole!=='admin'?'dis':''}" onclick="go('portfolio')"><span class="ic">◈</span><span>Portfolio</span>
-        ${notices.length?`<span class="badge ok">${notices.length}</span>`:''}</div>
+      <div id="sbPortfolioBtn" class="sb-it ${S.page==='portfolio'?'act':''} ${!notices.length&&_userRole!=='admin'&&!S._portfolioLoading?'dis':''}" onclick="go('portfolio')"><span class="ic">◈</span><span>Portfolio</span>
+        ${S._portfolioLoading?'<span style="font-size:10px;color:var(--t3);margin-left:4px">로딩 중...</span>'
+          :notices.length?`<span class="badge ok">${notices.length}</span>`:''}</div>
       <div class="sb-it ${S.page==='favorites'?'act':''}" onclick="go('favorites')"><span class="ic">★</span><span>Favorites</span>
         ${favs.length?`<span class="badge ok">${favs.length}</span>`:''}</div>
       ${_userRole==='admin'?`<div class="sb-it ${S.page==='admin'?'act':''}" onclick="goAdmin()"><span class="ic">👤</span><span>사용자 관리</span></div>
@@ -837,6 +848,14 @@ function renderSB(){
     </div>`;
 }
 
+/* Portfolio 로딩 완료 시 사이드바 반짝 효과 */
+function _flashPortfolioTab(){
+  const el=document.getElementById('sbPortfolioBtn');
+  if(!el) return;
+  el.classList.add('sb-flash');
+  el.addEventListener('animationend',()=>el.classList.remove('sb-flash'),{once:true});
+}
+
 function go(p){
   if(p==='upload'&&!S.connected)return;
   if(p==='portfolio'&&!S.notices.length&&_userRole!=='admin')return;
@@ -863,7 +882,7 @@ function toggleSbFund(idx){const k=window._sbFundKeys[idx];S.sbOpen[k]=S.sbOpen[
 function viewNotice(id,autoCorrect){
   const n=S.notices.find(x=>x.id===id);
 
-  // ── Pending LP notice: show LP code input popup instead of result page ──
+  // ── Pending LP notice: auto-apply if memory has codes, else show popup ──
   if(n && n.header._pending_lp){
     const ml={
       noticeId: n.id,
@@ -871,14 +890,18 @@ function viewNotice(id,autoCorrect){
       fundPreview: n.header._fund_preview||n.header.Underlying_Fund_Name_full||'',
       pageCount: n.page_count||0,
     };
-    // Create a synthetic job for the popup
     const syntheticJob={
       id: 'defer_'+n.id,
       fileName: n.fileName,
       status: 'multi_lp',
       _multiLp: ml,
-      _deferredNoticeId: n.id,  // track placeholder for deletion after parsing
+      _deferredNoticeId: n.id,
     };
+    // 같은 펀드에 이미 알려진 LP Code가 있으면 자동 파싱
+    if(_mlpAutoApply(syntheticJob)){
+      return;
+    }
+    // 메모리에 없으면 팝업 표시
     S.showMultiLp={job: syntheticJob};
     _multiLpRows=[{code:'',mode:'select'}];
     R();
@@ -905,7 +928,7 @@ function renderPG(){
   }
   switch(S.page){
     case'settings':h.innerHTML='<h1>설정</h1><p>서버 연결 · AI 모델 · Temperature</p>';b.innerHTML=pgSettings();loadGeminiModels();break;
-    case'upload':h.innerHTML='<h1>PDF 업로드</h1><p>Notice PDF를 업로드하면 자동 분석 후 누적 관리됩니다</p>';b.innerHTML=pgUpload();if(_userRole==='admin'&&!S._adminOrgs.length)loadAdminOrgs();break;
+    case'upload':h.innerHTML='<h1>PDF 업로드</h1><p>Notice PDF를 업로드하면 자동 분석 후 누적 관리됩니다</p>';b.innerHTML=(S._portfolioLoading?'<div style="display:flex;align-items:center;gap:8px;padding:12px 16px;background:var(--indigo-d);border:1px solid rgba(29,53,87,.15);border-radius:var(--r);margin-bottom:16px;font-size:12px;color:var(--indigo)"><div class="spin-s"></div>Portfolio 로딩 중...</div>':'')+pgUpload();if(_userRole==='admin'&&!S._adminOrgs.length)loadAdminOrgs();break;
     case'portfolio':h.innerHTML=`<h1>Portfolio Overview</h1><p>${S.notices.length}건의 Notice · Fund → LP → Class 계층 구조</p>`;b.innerHTML=(_userRole==='admin'?pgAdminOrgCards():'')+pgPortfolio();if(_userRole==='admin'){if(!S._adminOrgs.length)loadAdminOrgs();if(!S.notices.length&&!S._adminOrgFilter)adminFilterOrg('all');}break;
     case'favorites':h.innerHTML='<h1>★ 담당 펀드 설정</h1><p>관심 펀드를 선택하면 사이드바에 해당 펀드의 Notice만 표시됩니다</p>';b.innerHTML=pgFavorites();break;
     case'result':renderResultPG(h,b);break;
@@ -3750,12 +3773,13 @@ function rCommitment(n){
     const unfPrior=pN(hh.Unfunded_prior);
     const unfAfter=pN(hh.Unfunded_after);
     const funded=(commit!=null&&unfAfter!=null)?commit-unfAfter:null;
+    const fundedPrior=(commit!=null&&unfPrior!=null)?commit-unfPrior:null;
     const pct=(commit&&unfAfter!=null)?(1-unfAfter/commit)*100:null;
     let caAmount=0;
     realItems(notice.lineItems||[]).forEach(it=>{
       if(it.Commitment_affecting){const a=pN(it.LP_signed_amount);if(a!=null)caAmount+=a;}
     });
-    return{notice,idx:i+1,commit,unfPrior,unfAfter,funded,pct,caAmount:rd(caAmount),
+    return{notice,idx:i+1,commit,unfPrior,unfAfter,funded,fundedPrior,pct,caAmount:rd(caAmount),
       date:fmtDate(hh.issue_date||''),type:hh.notice_type,isCurrent:notice.id===n.id};
   });
 
@@ -3896,10 +3920,10 @@ function rCommitment(n){
       <td style="padding:6px 8px;font-size:11px;color:var(--t2);font-variant-numeric:tabular-nums">${isCur?'▶ ':' '}${r.idx}</td>
       <td style="padding:6px 8px;font-size:11px;font-variant-numeric:tabular-nums">${r.date||'N/A'}</td>
       <td style="padding:6px 8px"><span class="tg ${typeBadge}" style="font-size:10px;padding:1px 6px;border-radius:6px">${r.type==='Call'?'Call':r.type==='Distribution'?'Dist':'Adj'}</span></td>
-      <td class="amt" style="padding:6px 8px;font-size:12px">${fA(r.unfPrior)}</td>
+      <td class="amt" style="padding:6px 8px;font-size:12px">${fA(r.fundedPrior)}</td>
       <td class="amt" style="padding:6px 8px;font-size:12px">${fA(r.caAmount,true)}</td>
-      <td class="amt" style="padding:6px 8px;font-size:12px">${fA(r.unfAfter)}</td>
       <td class="amt" style="padding:6px 8px;font-size:12px">${fA(r.funded)}</td>
+      <td class="amt" style="padding:6px 8px;font-size:12px">${fA(r.unfAfter)}</td>
       <td class="amt" style="padding:6px 8px;font-size:12px;font-weight:600">${r.pct!=null?r.pct.toFixed(1)+'%':'—'}</td>
       <td class="amt" style="padding:6px 8px;font-size:11px;font-weight:600;color:${dCol}">${dText}</td>
     </tr>`;
@@ -3913,10 +3937,10 @@ function rCommitment(n){
           <th style="padding:6px 8px;text-align:left;color:var(--t3);font-size:10px;font-weight:600">#</th>
           <th style="padding:6px 8px;text-align:left;color:var(--t3);font-size:10px;font-weight:600">Date</th>
           <th style="padding:6px 8px;text-align:left;color:var(--t3);font-size:10px;font-weight:600">Type</th>
-          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">Unfunded Prior</th>
-          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">약정 영향</th>
-          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">Unfunded After</th>
+          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">Funded Prior</th>
+          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">약정 소진</th>
           <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">Funded After</th>
+          <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">Unfunded After</th>
           <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">소진율</th>
           <th style="padding:6px 8px;text-align:right;color:var(--t3);font-size:10px;font-weight:600">Δ</th>
         </tr></thead>
@@ -5776,12 +5800,13 @@ function _exCommitmentSheet(notice){
     const unfPrior=pN(hh.Unfunded_prior);
     const unfAfter=pN(hh.Unfunded_after);
     const funded=(commit!=null&&unfAfter!=null)?commit-unfAfter:null;
+    const fundedPrior=(commit!=null&&unfPrior!=null)?commit-unfPrior:null;
     const pct=(commit&&unfAfter!=null)?(1-unfAfter/commit)*100:null;
     let caAmount=0;
     realItems(n.lineItems||[]).forEach(it=>{
       if(it.Commitment_affecting){const a=pN(it.LP_signed_amount);if(a!=null)caAmount+=a;}
     });
-    return{idx:i+1,commit,unfPrior,unfAfter,funded,pct:pct!=null?rd(pct):null,caAmount:rd(caAmount),
+    return{idx:i+1,commit,unfPrior,unfAfter,funded,fundedPrior,pct:pct!=null?rd(pct):null,caAmount:rd(caAmount),
       date:fmtDate(hh.issue_date||''),type:hh.notice_type,isCurrent:n.id===notice.id};
   });
 
@@ -5798,17 +5823,17 @@ function _exCommitmentSheet(notice){
   rows.push([`Commitment History — ${h.Underlying_Fund_Name_full||h.Underlying_Fund_Name_short||''} / ${h.LP_Name_full||h.LP_Name_short||''}`]);
   rows.push([`Commitment: ${latestCommit!=null?latestCommit:'N/A'}`, `Currency: ${currency}`, `Notices: ${dataRows.length}`]);
   rows.push([]);
-  rows.push(['#', 'Date', 'Type', 'Unfunded Prior', 'CA Amount', 'Unfunded After', 'Funded', '소진율 (%)', 'Δ (%)']);
+  rows.push(['#', 'Date', 'Type', 'Funded Prior', '약정 소진', 'Funded After', 'Unfunded After', '소진율 (%)', 'Δ (%)']);
 
   dataRows.forEach(r=>{
     rows.push([
       r.isCurrent?`▶ ${r.idx}`:r.idx,
       r.date||'N/A',
       r.type||'',
-      r.unfPrior,
+      r.fundedPrior,
       r.caAmount,
-      r.unfAfter,
       r.funded,
+      r.unfAfter,
       r.pct,
       r.deltaPct
     ]);
@@ -6893,6 +6918,46 @@ let _multiLpRows=[{code:'',mode:'select'}]; // [{code, mode:'select'|'input'}]
 /* Memory: remember LP code selections per fund so user doesn't re-enter for same fund */
 let _multiLpMemory={}; // fundFingerprint → {codes:['975','8078'], fundPreview:'KKR...'}
 
+/* 페이지 로드 시 기존 notice에서 multi-LP 메모리를 재구축
+   같은 펀드에 이미 파싱된 notice의 LP Code가 있으면, pending LP notice 자동 적용에 사용 */
+function _rebuildMultiLpMemory(){
+  const pendingNotices=S.notices.filter(n=>n.header._pending_lp&&n.header._investor_ids?.length);
+  if(!pendingNotices.length) return;
+  pendingNotices.forEach(pn=>{
+    const fundKey=getFundKey(pn.header);
+    if(!fundKey) return;
+    const fp=_mlpFingerprint(pn.header._investor_ids);
+    if(!fp||_multiLpMemory[fp]) return;
+    // 같은 펀드의 이미 파싱된 notice에서 LP Code 수집
+    const knownCodes=new Set();
+    S.notices.forEach(n=>{
+      if(n.header._pending_lp) return;
+      if(getFundKey(n.header)!==fundKey) return;
+      const code=n.header.LP_code;
+      if(code&&code!=='N/A') knownCodes.add(code);
+    });
+    if(knownCodes.size>0){
+      _multiLpMemory[fp]={codes:[...knownCodes], fundPreview:pn.header._fund_preview||fundKey};
+      console.log(`[MULTI-LP REBUILD] Found ${knownCodes.size} LP codes for "${fundKey}": ${[...knownCodes].join(', ')}`);
+    }
+  });
+  // 메모리 복원 후 pending notice 자동 파싱 시도
+  pendingNotices.forEach(pn=>{
+    const fp=_mlpFingerprint(pn.header._investor_ids);
+    const mem=_multiLpMemory[fp];
+    if(!mem||!mem.codes.length) return;
+    console.log(`[MULTI-LP AUTO] Auto-parsing pending notice ${pn.id} with codes: ${mem.codes.join(', ')}`);
+    // placeholder 제거 후 실제 파싱 시작
+    S.notices=S.notices.filter(x=>x.id!==pn.id);
+    const syntheticJob={
+      id:'auto_'+pn.id, fileName:pn.fileName, status:'multi_lp',
+      _multiLp:{noticeId:pn.id, investorIds:pn.header._investor_ids, fundPreview:mem.fundPreview, pageCount:pn.page_count||0},
+      _deferredNoticeId:pn.id
+    };
+    _doMultiLpParse(syntheticJob, mem.codes);
+  });
+}
+
 function _mlpFingerprint(investorIds){
   // Same fund = same set of Investor IDs in the schedule
   return (investorIds||[]).slice().sort((a,b)=>a-b).join(',');
@@ -6907,6 +6972,10 @@ function _mlpAutoApply(job){
   if(!mem || !mem.codes || !mem.codes.length) return false;
 
   console.log(`[MULTI-LP] Auto-applying remembered LP codes for "${mem.fundPreview}": ${mem.codes.join(', ')}`);
+  // deferred notice placeholder 제거
+  if(job._deferredNoticeId){
+    S.notices=S.notices.filter(x=>x.id!==job._deferredNoticeId);
+  }
   job.status='done'; job.tDone=Date.now();
   _doMultiLpParse(job, mem.codes);
   return true;
