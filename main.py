@@ -2920,6 +2920,121 @@ async def admin_notice_org_toggle(body: dict, request: Request):
         return {"ok": True, "action": "added", "new_id": new_id, "org_id": target_org}
 
 
+# ── Org Change Request (기관 변경 요청) ──────────────────
+# settings 테이블에 key="_org_req_{user_id}" 로 저장
+
+@app.post("/api/auth/request-org-change")
+async def request_org_change(body: dict, request: Request):
+    """User requests org change. Stored as pending until admin approves."""
+    user = await get_current_user(request)
+    req_org_id = body.get("org_id", "").strip()
+    req_org_name = body.get("org_name", "").strip()
+
+    if not req_org_id and not req_org_name:
+        raise HTTPException(400, "org_id or org_name required")
+
+    # Resolve org
+    if req_org_name and not req_org_id:
+        # New org — will be created on approval
+        req_org_id = f"org_{req_org_name.lower().replace(' ', '_').replace('-', '_')[:30]}"
+
+    # Get current user info
+    ur = db_get("user_roles", user["id"], id_col="user_id")
+    current_org = ur.get("org_id", "") if ur else ""
+    current_org_name = ""
+    if current_org:
+        org_row = db_get("organizations", current_org)
+        if org_row: current_org_name = org_row.get("name", "")
+
+    # Save request
+    req_data = {
+        "user_id": user["id"],
+        "email": user.get("email", ""),
+        "name_en": f"{ur.get('name_en_first','')} {ur.get('name_en_last','')}".strip() if ur else "",
+        "current_org_id": current_org,
+        "current_org_name": current_org_name,
+        "requested_org_id": req_org_id,
+        "requested_org_name": req_org_name or req_org_id,
+        "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "status": "pending",
+    }
+    _set_setting(f"_org_req_{user['id']}", json.dumps(req_data))
+    print(f"  [ORG-REQ] {user['email']} requested org change: {current_org} → {req_org_id}")
+    return {"ok": True, "status": "pending"}
+
+
+@app.get("/api/auth/org-request-status")
+async def get_org_request_status(request: Request):
+    """Check if current user has a pending org change request."""
+    user = await get_current_user(request)
+    raw = _get_setting(f"_org_req_{user['id']}")
+    if not raw:
+        return {"has_request": False}
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        return {"has_request": True, "request": data}
+    except:
+        return {"has_request": False}
+
+
+@app.get("/api/admin/org-requests")
+async def admin_list_org_requests(request: Request):
+    """List all pending org change requests. Admin only."""
+    await require_admin(request)
+    # Scan settings for _org_req_ keys
+    rows = get_supa().table("settings").select("*").like("key", "_org_req_%").execute()
+    requests = []
+    for r in (rows.data or []):
+        try:
+            data = json.loads(r["value"]) if isinstance(r["value"], str) else r["value"]
+            if data.get("status") == "pending":
+                requests.append(data)
+        except:
+            pass
+    return requests
+
+
+@app.put("/api/admin/org-requests/{user_id}/approve")
+async def admin_approve_org_request(user_id: str, request: Request):
+    """Approve org change request. Admin only."""
+    admin = await require_admin(request)
+    raw = _get_setting(f"_org_req_{user_id}")
+    if not raw:
+        raise HTTPException(404, "Request not found")
+    data = json.loads(raw) if isinstance(raw, str) else raw
+
+    target_org_id = data.get("requested_org_id", "")
+    target_org_name = data.get("requested_org_name", "")
+
+    # Create org if it doesn't exist
+    existing_org = db_get("organizations", target_org_id)
+    if not existing_org:
+        db_insert("organizations", {"id": target_org_id, "name": target_org_name, "is_system": False})
+        print(f"  [ORG-REQ] Created new org: {target_org_name} ({target_org_id})")
+
+    # Update user's org
+    db_update("user_roles", {"org_id": target_org_id}, user_id, id_col="user_id")
+
+    # Mark request as approved
+    data["status"] = "approved"
+    data["approved_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    data["approved_by"] = admin["email"]
+    _set_setting(f"_org_req_{user_id}", json.dumps(data))
+    print(f"  [ORG-REQ] Approved: {data['email']} → {target_org_id}")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/org-requests/{user_id}")
+async def admin_reject_org_request(user_id: str, request: Request):
+    """Reject (delete) org change request. Admin only."""
+    await require_admin(request)
+    # Delete the setting
+    q = get_supa().table("settings").delete().eq("key", f"_org_req_{user_id}")
+    q.execute()
+    print(f"  [ORG-REQ] Rejected request for user {user_id}")
+    return {"ok": True}
+
+
 # ── Health ──────────────────────────────────────────────
 @app.get("/api/health")
 async def health():
