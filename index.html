@@ -2877,9 +2877,9 @@ function _fetchWithTimeout(fetchFn, timeoutMs){
 
 async function _fetchPdfBytes(noticeId){
   const MAX_RETRIES=4;
-  const RETRY_DELAYS=[2000,4000,6000]; // escalating: cold start needs time
-  const URL_TIMEOUT=15000;  // 15s for signed URL API call
-  const PDF_TIMEOUT=30000;  // 30s for PDF download
+  const RETRY_DELAYS=[3000,6000,10000]; // ★ Fix 3: cold start 대비 확대
+  const URL_TIMEOUT=30000;  // ★ 30s for signed URL (cold start 대비)
+  const PDF_TIMEOUT=45000;  // ★ 45s for PDF download
   const loadingSpan=document.querySelector('#pdfLoading span');
 
   for(let attempt=0; attempt<MAX_RETRIES; attempt++){
@@ -2926,11 +2926,15 @@ async function _fetchPdfBytes(noticeId){
   throw new Error(`PDF 로드 실패 (${MAX_RETRIES}회 시도)`);
 }
 
+let _pdfRenderLock=null; // ★ Fix 1: 중복 실행 방지 락
 async function pdfRenderPage(pageNum){
-  // ★ Race condition 방지: 시작 시점의 noticeId를 캡처하여 async 전체에서 사용
-  // 사용자가 Notice를 빠르게 전환하면 _pdfNoticeId가 await 도중 바뀔 수 있음
   const targetId = _pdfNoticeId;
   if(!targetId) return;
+  const lockKey=targetId+'_'+(pageNum||1);
+  if(_pdfRenderLock===lockKey) return; // ★ 같은 PDF+페이지 이미 렌더링 중
+  _pdfRenderLock=lockKey;
+  try{
+  // ★ Race condition 방지: 시작 시점의 noticeId를 캡처
   const canvas = document.getElementById('pdfCanvas');
   const loading = document.getElementById('pdfLoading');
 
@@ -3002,6 +3006,7 @@ async function pdfRenderPage(pageNum){
         <button class="btn btn-sm btn-s" onclick="_pdfDoc=null;_pdfCache.delete('${targetId}');pdfRenderPage(${_pdfPage})" style="margin-top:8px;font-size:11px">↻ 다시 시도</button>`;
     }
   }
+  }finally{ if(_pdfRenderLock===lockKey) _pdfRenderLock=null; } // ★ 락 해제
 }
 
 function pdfNav(dir){
@@ -3211,6 +3216,12 @@ function _posHL(loc){
 window._clearHL=function(){const hl=document.getElementById('hl');if(hl){hl.classList.remove('active');hl.style.display='none';}};
 window._setTitle=function(t){document.title=t+' — PDF';const el=document.getElementById('tt');if(el)el.textContent=t;};
 setInterval(()=>{if(!window.opener||window.opener.closed)document.title='[연결 끊김] '+document.title;},3000);
+// ★ Fix 2: 부모 창에서 에러 전달받는 함수
+window._showError=function(msg){
+  const ld=document.getElementById('ld');
+  if(ld){const sp=ld.querySelector('.spin');if(sp)sp.style.display='none';
+    ld.querySelector('span').textContent=msg;ld.style.display='flex';}
+};
 window._ready=true;
 ` + '</' + 'script></body></html>';
 
@@ -3233,7 +3244,11 @@ window._ready=true;
         }
       },100);
       setTimeout(()=>clearInterval(_waitReady),30000);
-    }catch(e){console.warn('PDF bytes send fail:',e);}
+    }catch(e){
+      console.warn('PDF bytes send fail:',e);
+      // ★ Fix 2: 자식 창에 에러 전달
+      if(_pdfWin&&!_pdfWin.closed){try{_pdfWin._showError('PDF 로드 실패: '+e.message);}catch(x){}}
+    }
   };
   _sendBytes();
   R();
@@ -3252,7 +3267,10 @@ async function _pdfWinSyncNotice(){
     if(!_pdfWinIsOpen()) return;
     _idbSet(targetId, buf);
     _pdfWin.initFromBytes(buf, 1, pc);
-  }catch(e){ console.warn('PDF child sync fail:', e); }
+  }catch(e){
+    console.warn('PDF child sync fail:', e);
+    if(_pdfWinIsOpen()){try{_pdfWin._showError('PDF 로드 실패');}catch(x){}}
+  }
 }
 
 
@@ -6002,19 +6020,14 @@ function openExportPopup(){
 
 function rExportPopup(){
   const d=S._exportPopup; if(!d) return'';
-  const fmtBtn=(val,label)=>`<button onclick="S._exportPopup.format='${val}';R()" style="flex:1;padding:10px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;border:1px solid ${d.format===val?'var(--indigo)':'var(--bdr)'};background:${d.format===val?'var(--indigo-d)':'var(--bg2)'};color:${d.format===val?'var(--indigo)':'var(--t2)'}">${label}</button>`;
   const scBtn=(val,label)=>`<button onclick="S._exportPopup.scope='${val}';R()" style="flex:1;padding:10px 16px;border-radius:6px;font-size:13px;font-weight:600;cursor:pointer;transition:all .15s;border:1px solid ${d.scope===val?'var(--indigo)':'var(--bdr)'};background:${d.scope===val?'var(--indigo-d)':'var(--bg2)'};color:${d.scope===val?'var(--indigo)':'var(--t2)'}">${label}</button>`;
   return`<div class="mo-bg" onclick="if(event.target===this){S._exportPopup=null;R();}">
     <div style="background:var(--bg3);border:1px solid var(--bdr);border-radius:var(--rl);padding:0;width:95%;max-width:400px">
       <div style="padding:16px 20px;border-bottom:1px solid var(--bdr)">
-        <div style="font-size:15px;font-weight:700">데이터 내보내기</div>
+        <div style="font-size:15px;font-weight:700">Excel 내보내기</div>
+        <div style="font-size:11px;color:var(--t3);margin-top:4px">Notice · Wire Info · Asset Exposure · Commitment 시트 포함</div>
       </div>
       <div style="padding:20px">
-        <div style="font-size:12px;font-weight:600;color:var(--t2);margin-bottom:8px">파일 형식</div>
-        <div style="display:flex;gap:8px;margin-bottom:18px">
-          ${fmtBtn('xlsx','.xlsx')}
-          ${fmtBtn('csv','.csv')}
-        </div>
         <div style="font-size:12px;font-weight:600;color:var(--t2);margin-bottom:8px">범위</div>
         <div style="display:flex;gap:8px">
           ${scBtn('current','현재 Notice만')}
