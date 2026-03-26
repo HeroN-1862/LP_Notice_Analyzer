@@ -218,13 +218,14 @@ details>summary{list-style:none}details>summary::-webkit-details-marker{display:
 
 .fi{animation:fin .3s ease}@keyframes fin{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 
-/* Result split layout */
-.rsplit{padding-right:410px;transition:padding .3s}
-.rsplit.full{padding-right:0}
-@media(max-width:1100px){.rsplit{padding-right:0}}
+/* Result split layout — ★ flex 기반 (position:fixed 제거) */
+.rsplit{display:flex;gap:16px}
+.rsplit.full{display:block}
+.rsplit>div:first-child{flex:1;min-width:0}
+@media(max-width:1100px){.rsplit{display:block}.rsplit>div:first-child{min-width:unset}}
 
-/* Right panel — fixed to viewport, not scroll */
-.rpanel{position:fixed;top:96px;right:24px;width:390px;max-height:calc(100vh - 108px);display:flex;flex-direction:column;z-index:45}
+/* Right panel — ★ sticky (not fixed) → 자연 흐름 내 배치, 헤더 아래 고정 */
+.rpanel{position:sticky;top:72px;width:390px;flex-shrink:0;max-height:calc(100vh - 84px);display:flex;flex-direction:column;z-index:5;align-self:flex-start}
 .seg-ctrl{display:flex;border:1px solid var(--bdr);border-radius:8px;overflow:hidden;margin-bottom:12px}
 .seg-btn{flex:1;padding:7px 4px;font-size:11px;font-weight:500;cursor:pointer;border:none;background:var(--bg2);color:var(--t2);transition:all .15s;text-align:center;font-family:var(--f)}
 .seg-btn:not(:last-child){border-right:1px solid var(--bdr)}
@@ -233,11 +234,11 @@ details>summary{list-style:none}details>summary::-webkit-details-marker{display:
 .seg-btn-hide{flex:0 0 36px}
 
 /* Expand button when hidden */
-.rpanel-expand{position:fixed;right:16px;z-index:45;width:28px;height:28px;border-radius:6px;background:var(--bg2);border:1px solid var(--bdr);display:grid;place-items:center;cursor:pointer;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.08)}
+.rpanel-expand{position:sticky;top:80px;align-self:flex-start;flex-shrink:0;width:28px;height:28px;border-radius:6px;background:var(--bg2);border:1px solid var(--bdr);display:grid;place-items:center;cursor:pointer;font-size:13px;box-shadow:0 2px 8px rgba(0,0,0,.08);z-index:5}
 .rpanel-expand:hover{background:var(--bg4);border-color:var(--t3)}
 
 /* QA Chat */
-.qa-wrap{display:flex;flex-direction:column;height:calc(100vh - 140px);border:1px solid var(--bdr);border-radius:var(--rl);overflow:hidden;background:var(--bg2)}
+.qa-wrap{display:flex;flex-direction:column;height:calc(100vh - 160px);border:1px solid var(--bdr);border-radius:var(--rl);overflow:hidden;background:var(--bg2)}
 .qa-msgs{flex:1;overflow-y:auto;padding:14px}
 .qa-msg{margin-bottom:12px;display:flex;gap:8px}
 .qa-msg .qa-avatar{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;font-size:11px;font-weight:700;flex-shrink:0}
@@ -264,7 +265,7 @@ details>summary{list-style:none}details>summary::-webkit-details-marker{display:
 .pdf-highlight.active{transform:scale(1.15) translateY(-2px);box-shadow:0 6px 20px rgba(255,180,0,.3),0 2px 8px rgba(0,0,0,.15);background:rgba(255,220,50,.4);border-color:rgba(255,160,0,.9);z-index:10}
 
 /* ILPA-style Fund Overview */
-.ilpa{background:#faf9f7;border:1px solid var(--bdr);border-radius:var(--rl);overflow:hidden;color:#1a1a2e;font-size:12px;position:sticky;top:70px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.ilpa{background:#faf9f7;border:1px solid var(--bdr);border-radius:var(--rl);overflow:hidden;color:#1a1a2e;font-size:12px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
 .ilpa-hd{background:#1a1a2e;color:#fff;text-align:center;padding:14px 18px}
 .ilpa-hd h3{font-size:14px;font-weight:700;letter-spacing:-.01em}
 .ilpa-hd p{font-size:11px;opacity:.65;margin-top:2px}
@@ -673,17 +674,9 @@ function R(){
   // Adjust right panel top to clear the actual header height
   requestAnimationFrame(()=>{
     const hdr=document.querySelector('.pg-h');
-    const rp=document.querySelector('.rpanel');
-    if(hdr&&rp){
-      const h=hdr.getBoundingClientRect().bottom;
-      rp.style.top=h+8+'px';
-      rp.style.maxHeight='calc(100vh - '+(h+20)+'px)';
-    }
-    // Position expand button below header
-    const rpExp=document.querySelector('.rpanel-expand');
-    if(rpExp&&hdr){
-      rpExp.style.top=(hdr.getBoundingClientRect().bottom+12)+'px';
-    }
+    // ★ rpanel은 이제 position:sticky — JS 동적 top 불필요
+    // sticky top은 CSS에서 72px로 고정 (pg-h 높이 ~56px + 여유)
+    // Position expand button — also sticky, no JS needed
     // Sync sidebar header height with main page header
     const sbHead=document.querySelector('.sb-head');
     if(sbHead&&hdr){
@@ -2848,18 +2841,13 @@ function rPdfViewer(n){
     </div>`;
   }
   if(_pdfNoticeId!==n.id){_pdfPage=1;_pdfNoticeId=n.id;_pdfPageCount=pc;_pdfZoom=100;_pdfDoc=null;}
-  const zoomW=_pdfExpanded?_pdfZoom:100;
+  const zoomW=100;
   // Trigger PDF.js render after DOM is ready
   setTimeout(()=>pdfRenderPage(_pdfPage),50);
-  return`<div class="pdf-wrap ${_pdfExpanded?'expanded':''}" id="pdfWrap">
+  return`<div class="pdf-wrap" id="pdfWrap">
     <div class="pdf-toolbar">
       <div class="pdf-zoom" style="display:flex;align-items:center;gap:6px">
-        ${_pdfExpanded?`
-          <button class="btn btn-sm btn-s" onclick="pdfToggleExpand()" style="font-weight:700">✕</button>
-          <input type="range" id="pdfZoomSlider" min="50" max="300" value="${_pdfZoom}" style="width:80px;accent-color:var(--indigo);cursor:pointer" oninput="pdfZoomSlide(this.value)">
-          <span id="pdfZoomLabel" style="min-width:36px;text-align:center;font-size:11px">${_pdfZoom}%</span>
-        `:`<button class="btn btn-sm btn-s" onclick="pdfToggleExpand()" title="확대">⛶ 확대</button>
-           <button class="btn btn-sm btn-s" onclick="pdfOpenWindow()" title="별도 창으로 열기 (듀얼 모니터)">↗</button>`}
+        <button class="btn btn-sm btn-s" onclick="pdfOpenWindow()" title="별도 창으로 열기 (듀얼 모니터)">새 창에서 PDF 열기</button>
       </div>
       <div class="pdf-nav">
         <button class="btn btn-sm btn-s" onclick="pdfNav(-1)">◀</button>
@@ -3156,7 +3144,10 @@ window.initFromBytes=async function(buf,pg,pc){
   const ld=document.getElementById('ld');
   if(ld){ld.querySelector('span').textContent='PDF 파싱 중...';}
   try{
-    _doc=await pdfjsLib.getDocument({data:buf}).promise;
+    // ★ Cross-window ArrayBuffer 복사 — 부모 창의 ArrayBuffer는 자식 창의 PDF.js가 인식 불가
+    // (각 window는 자체 ArrayBuffer 생성자를 가져서 instanceof 체크 실패)
+    const localBuf=new Uint8Array(buf).buffer;
+    _doc=await pdfjsLib.getDocument({data:localBuf}).promise;
     _pc=_doc.numPages;
     document.getElementById('pi').textContent=_pg+' / '+_pc;
     _render(_pg);
@@ -3245,7 +3236,6 @@ window._ready=true;
     }catch(e){console.warn('PDF bytes send fail:',e);}
   };
   _sendBytes();
-  if(_pdfExpanded){_pdfExpanded=false;_pdfZoom=100;}
   R();
 }
 
