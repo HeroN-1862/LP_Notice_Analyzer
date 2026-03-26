@@ -2962,7 +2962,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
 from openpyxl.utils import get_column_letter
 from datetime import datetime, date as dt_date
 
-# Style constants
+# ★ Style constants — 통일: Calibri 10pt
 _XS_NAVY = 'FF1D3557'
 _XS_NAVY_LIGHT = 'FFE8EDF3'
 _XS_GREEN = 'FF4E9A6D'
@@ -2971,17 +2971,17 @@ _XS_GRAY = 'FFF5F6F8'
 _XS_BDR = 'FFE2E8F0'
 _XS_WHITE = 'FFFFFFFF'
 
-_FNT_TITLE = Font(name='Calibri', size=14, bold=True, color=_XS_WHITE)
+_FNT_TITLE = Font(name='Calibri', size=12, bold=True, color=_XS_WHITE)
 _FNT_SEC = Font(name='Calibri', size=10, bold=True, color=_XS_NAVY)
-_FNT_HDR = Font(name='Calibri', size=9, bold=True, color='FF6B7280')
+_FNT_HDR = Font(name='Calibri', size=10, bold=True, color='FF6B7280')
 _FNT_BOLD = Font(name='Calibri', size=10, bold=True)
 _FNT_NORM = Font(name='Calibri', size=10)
-_FNT_SMALL = Font(name='Calibri', size=9, color='FF6B7280')
+_FNT_SMALL = Font(name='Calibri', size=10, color='FF6B7280')
 
 _FILL_NAVY = PatternFill('solid', fgColor=_XS_NAVY)
 _FILL_LIGHT = PatternFill('solid', fgColor=_XS_NAVY_LIGHT)
 _FILL_GRAY = PatternFill('solid', fgColor=_XS_GRAY)
-_FILL_CUR = PatternFill('solid', fgColor='FFDBEAFE')  # 현재 notice 하이라이트
+_FILL_CUR = PatternFill('solid', fgColor='FFDBEAFE')
 
 _ALIGN_R = Alignment(horizontal='right', vertical='center')
 _ALIGN_L = Alignment(horizontal='left', vertical='center')
@@ -2992,9 +2992,9 @@ _BDR_MED = Border(bottom=Side('medium', color=_XS_NAVY))
 _BDR_TOP_DBL = Border(top=Side('double', color='FF000000'))
 
 _NUM = '#,##0.00'
-_NUM_ACCT = '#,##0.00_);(#,##0.00)'
+_NUM_ACCT = '#,##0.00_);(#,##0.00)'  # 음수 괄호 표기
 _PCT = '0.0%'
-_PCT_DETAIL = '0.0000%'  # LP Interest 같은 소수점 이하 상세 %
+_PCT_DETAIL = '0.0000%'
 _DATE = 'YYYY-MM-DD'
 
 
@@ -3029,19 +3029,19 @@ def _xs_style_header_row(ws, row, max_col):
         cell.font = _FNT_HDR
         cell.fill = _FILL_LIGHT
         cell.border = _BDR_MED
-        if c >= 4:  # numeric columns
+        if c >= 4:
             cell.alignment = _ALIGN_R
 
 
+# ★ Notice 시트 — Issue/Due Date 데이터 행으로 분리, 틀 고정 해제
 def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
     """Build a single Notice sheet with formatting and formulas."""
     ws = wb.create_sheet(sheet_name)
     h = notice['header']
     items = [it for it in notice.get('line_items', []) if not it.get('is_subtotal')]
 
-    # Title row (merged) — Fund + Type + Issue Date
+    # Title row
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=5)
-    issue_dt = (h.get('issue_date', '') or '')[:10]
     title_cell = ws.cell(row=1, column=1,
         value=f"{h.get('Underlying_Fund_Name_full', '')} — {h.get('notice_type', '')} Notice")
     title_cell.font = _FNT_TITLE
@@ -3049,38 +3049,30 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
     title_cell.alignment = _ALIGN_L
     for c in range(2, 6):
         ws.cell(row=1, column=c).fill = _FILL_NAVY
-    ws.row_dimensions[1].height = 30
+    ws.row_dimensions[1].height = 28
 
-    # Subtitle row — dates
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=5)
-    due_dt = (h.get('due_date', '') or '')[:10]
-    ws.cell(row=2, column=1,
-        value=f"Issue: {issue_dt}  ·  Due: {due_dt}").font = Font(name='Calibri', size=9, color='FF6B7280')
-
-    # Header info
-    r = 4
+    # ★ Header info — Issue/Due Date를 데이터 행으로 포함
+    r = 3
     info_fields = [
-        ('Fund Name', h.get('Underlying_Fund_Name_full', '')),
-        ('Notice Title', h.get('notice_title', '')),
-        ('Notice Number', h.get('notice_number', '')),
-        ('Issue Date', _xs_date(h.get('issue_date', ''))),
-        ('Due Date', _xs_date(h.get('due_date', ''))),
-        ('LP Name', h.get('LP_Name_full', '')),
-        ('LP Code', h.get('LP_code', '')),
-        ('Commitment', _pn(h.get('Commitment_original'))),
-        ('LP Interest %', _pn(h.get('pct_LP_Interest'))),
+        ('Fund Name', h.get('Underlying_Fund_Name_full', ''), None),
+        ('Notice Title', h.get('notice_title', ''), None),
+        ('Notice Number', h.get('notice_number', ''), None),
+        ('Issue Date', _xs_date(h.get('issue_date', '')), _DATE),
+        ('Due Date', _xs_date(h.get('due_date', '')), _DATE),
+        ('LP Name', h.get('LP_Name_full', ''), None),
+        ('LP Code', h.get('LP_code', ''), None),
+        ('Commitment', _pn(h.get('Commitment_original')), _NUM_ACCT),
+        ('LP Interest %', _pn(h.get('pct_LP_Interest')), _PCT_DETAIL),
     ]
-    for label, val in info_fields:
+    for label, val, fmt in info_fields:
         ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
         ws.cell(row=r, column=1).fill = _FILL_GRAY
         ws.cell(row=r, column=1).border = _BDR_THIN
-        cell = ws.cell(row=r, column=2, value=val)
+        cell = ws.cell(row=r, column=2, value=round(val, 2) if isinstance(val, float) else val)
         cell.font = _FNT_NORM
         cell.border = _BDR_THIN
-        if isinstance(val, (int, float)) and val and label == 'Commitment':
-            cell.number_format = _NUM
-        elif label == 'LP Interest %' and val is not None:
-            cell.number_format = _PCT_DETAIL
+        if fmt:
+            cell.number_format = fmt
         elif isinstance(val, dt_date):
             cell.number_format = _DATE
         r += 1
@@ -3100,6 +3092,7 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
         val = _pn(h.get(key))
         cell = ws.cell(row=r, column=2, value=round(val, 2) if val is not None else None)
         cell.number_format = _NUM_ACCT
+        cell.font = _FNT_NORM
         cell.border = _BDR_THIN
         r += 1
 
@@ -3118,9 +3111,8 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
         val = _pn(h.get(key))
         cell = ws.cell(row=r, column=2, value=round(val, 2) if val is not None else None)
         cell.number_format = _NUM_ACCT
+        cell.font = _FNT_BOLD if label == 'LP Net Amount' else _FNT_NORM
         cell.border = _BDR_THIN
-        if label == 'LP Net Amount':
-            cell.font = _FNT_BOLD
         r += 1
 
     # Section: After
@@ -3138,6 +3130,7 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
         val = _pn(h.get(key))
         cell = ws.cell(row=r, column=2, value=round(val, 2) if val is not None else None)
         cell.number_format = _NUM_ACCT
+        cell.font = _FNT_NORM
         cell.border = _BDR_THIN
         r += 1
 
@@ -3167,9 +3160,11 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
         amt_cell = ws.cell(row=r, column=3, value=round(amt, 2) if amt is not None else None)
         amt_cell.number_format = _NUM_ACCT
         amt_cell.alignment = _ALIGN_R
+        amt_cell.font = _FNT_NORM
         ws.cell(row=r, column=4, value='Call' if it.get('Transaction_type') == 'call' else 'Dist').alignment = _ALIGN_C
+        ws.cell(row=r, column=4).font = _FNT_NORM
         ws.cell(row=r, column=5, value='Yes' if it.get('Commitment_affecting') else 'No').alignment = _ALIGN_C
-        # Thin bottom border + alternate row shading
+        ws.cell(row=r, column=5).font = _FNT_NORM
         for c in range(1, 6):
             ws.cell(row=r, column=c).border = _BDR_THIN
             if idx % 2 == 1:
@@ -3193,7 +3188,7 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
     summary_items = [
         ('Commitment Affecting — Calls', f'=SUMPRODUCT(({col_type}{item_start}:{col_type}{item_end}="Call")*({col_ca}{item_start}:{col_ca}{item_end}="Yes")*({col_amt}{item_start}:{col_amt}{item_end}))'),
         ('Commitment Affecting — Distributions', f'=SUMPRODUCT(({col_type}{item_start}:{col_type}{item_end}="Dist")*({col_ca}{item_start}:{col_ca}{item_end}="Yes")*({col_amt}{item_start}:{col_amt}{item_end}))'),
-        ('Commitment Affecting — Subtotal', None),  # =SUM of above 2
+        ('Commitment Affecting — Subtotal', None),
         ('Non-Commitment — Calls', f'=SUMPRODUCT(({col_type}{item_start}:{col_type}{item_end}="Call")*({col_ca}{item_start}:{col_ca}{item_end}="No")*({col_amt}{item_start}:{col_amt}{item_end}))'),
         ('Non-Commitment — Distributions', f'=SUMPRODUCT(({col_type}{item_start}:{col_type}{item_end}="Dist")*({col_ca}{item_start}:{col_ca}{item_end}="No")*({col_amt}{item_start}:{col_amt}{item_end}))'),
         ('Non-Commitment — Subtotal', None),
@@ -3207,21 +3202,22 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
         cell = ws.cell(row=r, column=3)
         cell.number_format = _NUM_ACCT
         cell.alignment = _ALIGN_R
+        cell.font = _FNT_NORM
         if formula:
             cell.value = formula
-        elif i == 2:  # CA Subtotal
+        elif i == 2:
             cell.value = f'={col_amt}{sum_start}+{col_amt}{sum_start + 1}'
             cell.font = _FNT_BOLD
             cell.border = Border(top=Side('thin', color=_XS_BDR))
-        elif i == 5:  # NC Subtotal
+        elif i == 5:
             cell.value = f'={col_amt}{sum_start + 3}+{col_amt}{sum_start + 4}'
             cell.font = _FNT_BOLD
             cell.border = Border(top=Side('thin', color=_XS_BDR))
-        elif i == 6:  # Total Calls
+        elif i == 6:
             cell.value = f'={col_amt}{sum_start}+{col_amt}{sum_start + 3}'
-        elif i == 7:  # Total Dist
+        elif i == 7:
             cell.value = f'={col_amt}{sum_start + 1}+{col_amt}{sum_start + 4}'
-        elif i == 8:  # Net
+        elif i == 8:
             cell.value = f'={col_amt}{r - 2}+{col_amt}{r - 1}'
             cell.font = _FNT_BOLD
             cell.border = _BDR_TOP_DBL
@@ -3234,12 +3230,12 @@ def _xs_notice_sheet(wb, notice, sheet_name='Notice'):
     ws.column_dimensions['C'].width = 20
     ws.column_dimensions['D'].width = 10
     ws.column_dimensions['E'].width = 10
-    # Freeze pane below header info
-    ws.freeze_panes = f'A{hdr_row + 1}'
+    # ★ 틀 고정 해제 (기존: ws.freeze_panes = ...)
 
 
-def _xs_wire_sheet(wb, notice):
-    """Build Wire Info sheet."""
+# ★ Wire Info 시트 — Fund 내 Wire 이력 비교표 추가
+def _xs_wire_sheet(wb, notice, fund_lp_notices=None):
+    """Build Wire Info sheet with wire history comparison."""
     ws = wb.create_sheet('Wire Info')
     h = notice['header']
     wires = h.get('wire_info', [])
@@ -3250,99 +3246,137 @@ def _xs_wire_sheet(wb, notice):
     ws.cell(row=1, column=1, value='Wire Information').font = _FNT_TITLE
     ws.cell(row=1, column=1).fill = _FILL_NAVY
     ws.cell(row=1, column=2).fill = _FILL_NAVY
-    ws.row_dimensions[1].height = 30
+    ws.row_dimensions[1].height = 28
 
     r = 3
     ws.cell(row=r, column=1, value='Direction').font = _FNT_BOLD
-    ws.cell(row=r, column=2, value='Outbound (Capital Call)' if net and net > 0 else 'Inbound (Distribution)' if net and net < 0 else 'Adjustment')
+    ws.cell(row=r, column=2, value='Outbound (Capital Call)' if net and net > 0 else 'Inbound (Distribution)' if net and net < 0 else 'Adjustment').font = _FNT_NORM
     r += 1
     ws.cell(row=r, column=1, value='Net Amount').font = _FNT_BOLD
-    c = ws.cell(row=r, column=2, value=net)
+    c = ws.cell(row=r, column=2, value=round(net, 2) if net else net)
     c.number_format = _NUM_ACCT
+    c.font = _FNT_NORM
 
     if not wire:
         r += 2
         ws.cell(row=r, column=1, value='Wire 정보 없음').font = _FNT_SMALL
     else:
-        # Beneficiary Bank
-        r += 2
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
-        ws.cell(row=r, column=1, value='Beneficiary Bank (수익자 은행)').font = _FNT_SEC
-        ws.cell(row=r, column=1).fill = _FILL_LIGHT
-        ws.cell(row=r, column=2).fill = _FILL_LIGHT
-        r += 1
-        for label, key in [('Bank Name', 'beneficiary_bank_name'), ('Address', 'beneficiary_bank_address'),
-                           ('SWIFT / BIC', 'beneficiary_bank_swift_code'), ('ABA Routing', 'beneficiary_bank_aba_routing'),
-                           ('Account #', 'beneficiary_bank_account_number')]:
-            val = wire.get(key, '') or ''
-            if val and val != 'N/A':
-                ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
-                ws.cell(row=r, column=1).fill = _FILL_GRAY
-                ws.cell(row=r, column=2, value=val).font = _FNT_NORM
-                if 'account' in key.lower() or 'routing' in key.lower():
-                    ws.cell(row=r, column=2).number_format = '@'  # 텍스트 서식 (앞자리 0 보존)
-                r += 1
+        def _wire_section(ws, r, title, fields, wire_data):
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+            ws.cell(row=r, column=1, value=title).font = _FNT_SEC
+            ws.cell(row=r, column=1).fill = _FILL_LIGHT
+            ws.cell(row=r, column=2).fill = _FILL_LIGHT
+            r += 1
+            for label, key in fields:
+                val = wire_data.get(key, '') or ''
+                if val and val != 'N/A':
+                    ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
+                    ws.cell(row=r, column=1).fill = _FILL_GRAY
+                    ws.cell(row=r, column=2, value=val).font = _FNT_NORM
+                    if 'account' in key.lower() or 'routing' in key.lower():
+                        ws.cell(row=r, column=2).number_format = '@'
+                    r += 1
+            return r
 
-        # Beneficiary
+        r += 2
+        r = _wire_section(ws, r, 'Beneficiary Bank (수익자 은행)', [
+            ('Bank Name', 'beneficiary_bank_name'), ('Address', 'beneficiary_bank_address'),
+            ('SWIFT / BIC', 'beneficiary_bank_swift_code'), ('ABA Routing', 'beneficiary_bank_aba_routing'),
+            ('Account #', 'beneficiary_bank_account_number')
+        ], wire)
+
         bn = wire.get('beneficiary_name', '') or wire.get('beneficiary_account_name', '') or ''
         ba = wire.get('beneficiary_account_number', '') or ''
         if (bn and bn != 'N/A') or (ba and ba != 'N/A'):
             r += 1
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
-            ws.cell(row=r, column=1, value='Beneficiary (수익자)').font = _FNT_SEC
-            ws.cell(row=r, column=1).fill = _FILL_LIGHT
-            ws.cell(row=r, column=2).fill = _FILL_LIGHT
-            r += 1
+            r = _wire_section(ws, r, 'Beneficiary (수익자)', [], wire)
             if bn and bn != 'N/A':
                 ws.cell(row=r, column=1, value='Name').font = _FNT_BOLD
                 ws.cell(row=r, column=1).fill = _FILL_GRAY
-                ws.cell(row=r, column=2, value=bn)
+                ws.cell(row=r, column=2, value=bn).font = _FNT_NORM
                 r += 1
             if ba and ba != 'N/A':
                 ws.cell(row=r, column=1, value='Account #').font = _FNT_BOLD
                 ws.cell(row=r, column=1).fill = _FILL_GRAY
-                ws.cell(row=r, column=2, value=ba).number_format = '@'
+                ws.cell(row=r, column=2, value=ba).font = _FNT_NORM
+                ws.cell(row=r, column=2).number_format = '@'
                 r += 1
 
-        # Reference / Further Credit
         ref = wire.get('reference', '') or ''
         fc = wire.get('further_credit', '') or ''
-        if (ref and ref != 'N/A') or (fc and fc != 'N/A'):
-            if ref and ref != 'N/A':
-                ws.cell(row=r, column=1, value='Reference').font = _FNT_BOLD
-                ws.cell(row=r, column=1).fill = _FILL_GRAY
-                ws.cell(row=r, column=2, value=ref)
-                r += 1
-            if fc and fc != 'N/A':
-                ws.cell(row=r, column=1, value='Further Credit').font = _FNT_BOLD
-                ws.cell(row=r, column=1).fill = _FILL_GRAY
-                ws.cell(row=r, column=2, value=fc)
-                r += 1
+        if ref and ref != 'N/A':
+            ws.cell(row=r, column=1, value='Reference').font = _FNT_BOLD
+            ws.cell(row=r, column=1).fill = _FILL_GRAY
+            ws.cell(row=r, column=2, value=ref).font = _FNT_NORM
+            r += 1
+        if fc and fc != 'N/A':
+            ws.cell(row=r, column=1, value='Further Credit').font = _FNT_BOLD
+            ws.cell(row=r, column=1).fill = _FILL_GRAY
+            ws.cell(row=r, column=2, value=fc).font = _FNT_NORM
+            r += 1
 
-        # Intermediary
         ib = wire.get('intermediary_bank_name', '') or ''
         if ib and ib != 'N/A':
             r += 1
-            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
-            ws.cell(row=r, column=1, value='Intermediary Bank (중개은행)').font = _FNT_SEC
-            ws.cell(row=r, column=1).fill = _FILL_LIGHT
-            ws.cell(row=r, column=2).fill = _FILL_LIGHT
+            r = _wire_section(ws, r, 'Intermediary Bank (중개은행)', [
+                ('Bank Name', 'intermediary_bank_name'), ('SWIFT / BIC', 'intermediary_swift_code'),
+                ('Account #', 'intermediary_account_number')
+            ], wire)
+
+    # ★ Wire 이력 비교표
+    if fund_lp_notices and len(fund_lp_notices) > 1:
+        r += 2
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=6)
+        ws.cell(row=r, column=1, value='Fund 내 Wire 이력 비교').font = _FNT_SEC
+        ws.cell(row=r, column=1).fill = _FILL_LIGHT
+        for c in range(2, 7):
+            ws.cell(row=r, column=c).fill = _FILL_LIGHT
+        r += 1
+        for ci, txt in enumerate(['Date', 'Type', 'Net Amount', 'SWIFT (은행)', '계좌번호 (은행)', '은행명'], 1):
+            ws.cell(row=r, column=ci, value=txt).font = _FNT_HDR
+            ws.cell(row=r, column=ci).fill = _FILL_LIGHT
+            ws.cell(row=r, column=ci).border = _BDR_MED
+        r += 1
+        for fn in fund_lp_notices:
+            fh = fn['header']
+            fn_net = _pn(fh.get('LP_net_amount'))
+            fn_wires = fh.get('wire_info', [])
+            fn_wire = fn_wires[0] if fn_wires else {}
+            is_cur = fn['id'] == notice['id']
+            swift = fn_wire.get('beneficiary_bank_swift_code', '') or ''
+            acct = fn_wire.get('beneficiary_bank_account_number', '') or ''
+            bank = fn_wire.get('beneficiary_bank_name', '') or ''
+            dt_val = _xs_date(fh.get('issue_date', ''))
+            tp = 'Out' if fn_net and fn_net > 0 else 'In' if fn_net and fn_net < 0 else 'Adj'
+
+            ws.cell(row=r, column=1, value=dt_val).font = _FNT_BOLD if is_cur else _FNT_NORM
+            if isinstance(dt_val, dt_date):
+                ws.cell(row=r, column=1).number_format = _DATE
+            ws.cell(row=r, column=2, value=tp).font = _FNT_NORM
+            ws.cell(row=r, column=2).alignment = _ALIGN_C
+            ws.cell(row=r, column=3, value=round(fn_net, 2) if fn_net else None).number_format = _NUM_ACCT
+            ws.cell(row=r, column=3).font = _FNT_NORM
+            ws.cell(row=r, column=4, value=swift).font = _FNT_NORM
+            ws.cell(row=r, column=5, value=acct).font = _FNT_NORM
+            ws.cell(row=r, column=5).number_format = '@'
+            ws.cell(row=r, column=6, value=bank).font = _FNT_NORM
+            for ci in range(1, 7):
+                ws.cell(row=r, column=ci).border = _BDR_THIN
+                if is_cur:
+                    ws.cell(row=r, column=ci).fill = _FILL_CUR
             r += 1
-            for label, key in [('Bank Name', 'intermediary_bank_name'), ('SWIFT / BIC', 'intermediary_swift_code'),
-                               ('Account #', 'intermediary_account_number')]:
-                val = wire.get(key, '') or ''
-                if val and val != 'N/A':
-                    ws.cell(row=r, column=1, value=label).font = _FNT_BOLD
-                    ws.cell(row=r, column=1).fill = _FILL_GRAY
-                    ws.cell(row=r, column=2, value=val)
-                    r += 1
 
     ws.column_dimensions['A'].width = 20
     ws.column_dimensions['B'].width = 55
+    ws.column_dimensions['C'].width = 18
+    ws.column_dimensions['D'].width = 16
+    ws.column_dimensions['E'].width = 18
+    ws.column_dimensions['F'].width = 28
 
 
+# ★ Commitment 시트 — Total Commitment 상단 표기, 수식 기반
 def _xs_commitment_sheet(wb, notices, current_id):
-    """Build Commitment sheet with formulas."""
+    """Build Commitment sheet with Excel formulas."""
     ws = wb.create_sheet('Commitment')
     if not notices:
         ws.cell(row=1, column=1, value='데이터 없음')
@@ -3361,71 +3395,104 @@ def _xs_commitment_sheet(wb, notices, current_id):
     ws.cell(row=1, column=1).fill = _FILL_NAVY
     for c in range(2, 10):
         ws.cell(row=1, column=c).fill = _FILL_NAVY
-    ws.row_dimensions[1].height = 30
+    ws.row_dimensions[1].height = 28
 
-    # Subtitle
-    ws.cell(row=2, column=1, value=f'Commitment: {commit:,.2f}' if commit else 'Commitment: N/A').font = _FNT_SMALL
+    # ★ Total Commitment 상단 표기
+    ws.cell(row=2, column=1, value='Total Commitment').font = _FNT_BOLD
+    commit_cell = ws.cell(row=2, column=2, value=round(commit, 2) if commit else None)
+    commit_cell.number_format = _NUM_ACCT
+    commit_cell.font = _FNT_BOLD
+    commit_ref = 'B2'  # ★ 수식에서 참조할 셀
+
     currency = h0.get('Currency', 'USD') or 'USD'
     if currency == 'N/A': currency = 'USD'
-    ws.cell(row=2, column=2, value=f'Currency: {currency}').font = _FNT_SMALL
-    ws.cell(row=2, column=3, value=f'Notices: {len(notices)}').font = _FNT_SMALL
+    ws.cell(row=2, column=3, value=f'Currency: {currency}').font = _FNT_SMALL
+    ws.cell(row=2, column=4, value=f'Notices: {len(notices)}').font = _FNT_SMALL
 
-    # Headers (row 4) — 웹 UI와 동기화된 컬럼명
+    # Headers (row 4)
     headers = ['#', 'Date', 'Type', 'Funded Prior', '약정 소진', 'Funded After', 'Unfunded After', '소진율', 'Δ']
     for ci, txt in enumerate(headers, 1):
         ws.cell(row=4, column=ci, value=txt)
     _xs_style_header_row(ws, 4, 9)
 
-    # Data rows
-    prev_pct = None
+    # ★ Data rows — 수식 기반
     for i, n in enumerate(notices):
         r = 5 + i
         hh = n['header']
         is_cur = (n['id'] == current_id)
-        uf_prior = _pn(hh.get('Unfunded_prior'))
-        uf_after = _pn(hh.get('Unfunded_after'))
-        funded_prior = round(commit - uf_prior, 2) if commit and uf_prior is not None else None
-        funded_after = round(commit - uf_after, 2) if commit and uf_after is not None else None
-        pct = (1 - uf_after / commit) if commit and uf_after is not None else None
-        delta = (pct - prev_pct) if pct is not None and prev_pct is not None else (pct if pct is not None and i == 0 else None)
 
-        # 약정 소진 (CA amount)
+        # B: Date
+        dt_val = _xs_date(hh.get('issue_date', ''))
+        ws.cell(row=r, column=1, value=i + 1).alignment = _ALIGN_C
+        ws.cell(row=r, column=1).font = _FNT_NORM
+        c_date = ws.cell(row=r, column=2, value=dt_val)
+        c_date.font = _FNT_NORM
+        if isinstance(dt_val, dt_date): c_date.number_format = _DATE
+
+        # C: Type
+        ws.cell(row=r, column=3, value=hh.get('notice_type', '')).alignment = _ALIGN_C
+        ws.cell(row=r, column=3).font = _FNT_NORM
+
+        # ★ G: Unfunded After = Total Commitment - Funded After (수식)
+        ws.cell(row=r, column=7, value=f'={commit_ref}-F{r}')
+        ws.cell(row=r, column=7).number_format = _NUM_ACCT
+        ws.cell(row=r, column=7).alignment = _ALIGN_R
+        ws.cell(row=r, column=7).font = _FNT_NORM
+
+        # E: 약정 소진 (CA amount — 원본 데이터)
         ca = 0
         for it in n.get('line_items', []):
             if it.get('is_subtotal'): continue
             if it.get('Commitment_affecting'):
                 a = _pn(it.get('LP_signed_amount'))
                 if a is not None: ca += a
-
-        ws.cell(row=r, column=1, value=i + 1).alignment = _ALIGN_C
-        dt_val = _xs_date(hh.get('issue_date', ''))
-        c_date = ws.cell(row=r, column=2, value=dt_val)
-        if isinstance(dt_val, dt_date): c_date.number_format = _DATE
-        ws.cell(row=r, column=3, value=hh.get('notice_type', '')).alignment = _ALIGN_C
-        ws.cell(row=r, column=4, value=funded_prior).number_format = _NUM_ACCT
-        ws.cell(row=r, column=4).alignment = _ALIGN_R
-        ws.cell(row=r, column=5, value=round(ca, 2)).number_format = _NUM_ACCT
+        ws.cell(row=r, column=5, value=round(ca, 2))
+        ws.cell(row=r, column=5).number_format = _NUM_ACCT
         ws.cell(row=r, column=5).alignment = _ALIGN_R
-        ws.cell(row=r, column=6, value=funded_after).number_format = _NUM_ACCT
-        ws.cell(row=r, column=6).alignment = _ALIGN_R
-        ws.cell(row=r, column=7, value=round(uf_after, 2) if uf_after is not None else None).number_format = _NUM_ACCT
-        ws.cell(row=r, column=7).alignment = _ALIGN_R
-        c_pct = ws.cell(row=r, column=8, value=pct)
-        c_pct.number_format = _PCT
-        c_pct.alignment = _ALIGN_R
-        c_pct.font = _FNT_BOLD
-        c_delta = ws.cell(row=r, column=9, value=delta)
-        c_delta.number_format = '+0.0%;-0.0%'
-        c_delta.alignment = _ALIGN_R
+        ws.cell(row=r, column=5).font = _FNT_NORM
 
-        # Thin borders + highlight current notice
+        # ★ D: Funded Prior = Commitment - Unfunded_prior
+        # Unfunded_prior = 직전 행의 Unfunded After (첫 행은 header에서)
+        uf_prior = _pn(hh.get('Unfunded_prior'))
+        if i == 0 and uf_prior is not None:
+            # 첫 행: Unfunded_prior를 직접 사용
+            ws.cell(row=r, column=4, value=f'={commit_ref}-{round(uf_prior, 2)}')
+        elif i > 0:
+            # 후속 행: 직전 행의 G열(Unfunded After) 참조
+            ws.cell(row=r, column=4, value=f'={commit_ref}-G{r - 1}')
+        else:
+            ws.cell(row=r, column=4, value=None)
+        ws.cell(row=r, column=4).number_format = _NUM_ACCT
+        ws.cell(row=r, column=4).alignment = _ALIGN_R
+        ws.cell(row=r, column=4).font = _FNT_NORM
+
+        # ★ F: Funded After = D + E (Funded Prior + 약정 소진)
+        ws.cell(row=r, column=6, value=f'=D{r}+E{r}')
+        ws.cell(row=r, column=6).number_format = _NUM_ACCT
+        ws.cell(row=r, column=6).alignment = _ALIGN_R
+        ws.cell(row=r, column=6).font = _FNT_NORM
+
+        # ★ H: 소진율 = 1 - G / Commitment (= 1 - Unfunded/Commitment)
+        ws.cell(row=r, column=8, value=f'=IF({commit_ref}=0,"",1-G{r}/{commit_ref})')
+        ws.cell(row=r, column=8).number_format = _PCT
+        ws.cell(row=r, column=8).alignment = _ALIGN_R
+        ws.cell(row=r, column=8).font = _FNT_BOLD
+
+        # ★ I: Δ = H열 - 직전 행 H열
+        if i == 0:
+            ws.cell(row=r, column=9, value=f'=H{r}')
+        else:
+            ws.cell(row=r, column=9, value=f'=H{r}-H{r - 1}')
+        ws.cell(row=r, column=9).number_format = '+0.0%;-0.0%'
+        ws.cell(row=r, column=9).alignment = _ALIGN_R
+        ws.cell(row=r, column=9).font = _FNT_NORM
+
+        # Borders + highlight
         for c in range(1, 10):
             ws.cell(row=r, column=c).border = _BDR_THIN
             if is_cur:
                 ws.cell(row=r, column=c).fill = _FILL_CUR
                 if c in (1, 2, 3): ws.cell(row=r, column=c).font = _FNT_BOLD
-
-        prev_pct = pct
 
     # Column widths
     for col, w in [('A', 6), ('B', 14), ('C', 12), ('D', 18), ('E', 18), ('F', 18), ('G', 18), ('H', 12), ('I', 10)]:
@@ -3445,26 +3512,26 @@ def _xs_exposure_sheet(wb, notices, current_id, asset_groups=None):
 
     # Title
     title = f"Asset Exposure Matrix — {h0.get('Underlying_Fund_Name_short', '')} / {h0.get('LP_Name_short', '')}"
-    last_col = n_count + 3  # A:Group, B:Raw, C~:notices, last:Total
+    last_col = n_count + 3
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=last_col)
     ws.cell(row=1, column=1, value=title).font = _FNT_TITLE
     ws.cell(row=1, column=1).fill = _FILL_NAVY
     for c in range(2, last_col + 1):
         ws.cell(row=1, column=c).fill = _FILL_NAVY
-    ws.row_dimensions[1].height = 30
+    ws.row_dimensions[1].height = 28
 
     # Column headers (row 3)
-    ws.cell(row=3, column=1, value='Asset Group')
-    ws.cell(row=3, column=2, value='Item Name')
+    ws.cell(row=3, column=1, value='Asset Group').font = _FNT_HDR
+    ws.cell(row=3, column=2, value='Item Name').font = _FNT_HDR
     for ni, n in enumerate(notices):
         dt = n['header'].get('issue_date', '')[:10] or '?'
         tp = n['header'].get('notice_type', '')
-        ws.cell(row=3, column=3 + ni, value=f"#{ni + 1} {dt} ({tp})")
-    ws.cell(row=3, column=last_col, value='Total')
+        ws.cell(row=3, column=3 + ni, value=f"#{ni + 1} {dt} ({tp})").font = _FNT_HDR
+    ws.cell(row=3, column=last_col, value='Total').font = _FNT_HDR
     _xs_style_header_row(ws, 3, last_col)
 
     # Build grouped data
-    groups = {}  # canonical → {raw → [amts per notice]}
+    groups = {}
     ag = asset_groups or {}
     ag_reverse = {}
     for canonical, members in ag.items():
@@ -3473,7 +3540,7 @@ def _xs_exposure_sheet(wb, notices, current_id, asset_groups=None):
 
     def _get_canonical(raw):
         if raw in ag_reverse: return ag_reverse[raw]
-        return raw  # fallback
+        return raw
 
     for ni, n in enumerate(notices):
         if n.get('is_voided'): continue
@@ -3499,7 +3566,6 @@ def _xs_exposure_sheet(wb, notices, current_id, asset_groups=None):
             amts = raw_map[raw]
             ws.cell(row=r, column=1, value=canonical if r == group_start else '').font = _FNT_NORM
             ws.cell(row=r, column=2, value=raw).font = _FNT_NORM
-            total_col_letter = get_column_letter(last_col)
             first_data_col = get_column_letter(3)
             last_data_col = get_column_letter(2 + n_count)
             for ni, amt in enumerate(amts):
@@ -3507,16 +3573,15 @@ def _xs_exposure_sheet(wb, notices, current_id, asset_groups=None):
                     c = ws.cell(row=r, column=3 + ni, value=round(amt, 2))
                     c.number_format = _NUM_ACCT
                     c.alignment = _ALIGN_R
-            # Total column — formula
+                    c.font = _FNT_NORM
             ws.cell(row=r, column=last_col,
                 value=f'=SUM({first_data_col}{r}:{last_data_col}{r})').number_format = _NUM_ACCT
             ws.cell(row=r, column=last_col).alignment = _ALIGN_R
-            # Thin border on all cells
+            ws.cell(row=r, column=last_col).font = _FNT_NORM
             for ci in range(1, last_col + 1):
                 ws.cell(row=r, column=ci).border = _BDR_THIN
             r += 1
 
-        # Subtotal row (only if >1 raw names)
         if len(raw_names) > 1:
             ws.cell(row=r, column=1, value=f'Subtotal: {canonical}').font = _FNT_BOLD
             for ci in range(3, last_col + 1):
@@ -3536,7 +3601,6 @@ def _xs_exposure_sheet(wb, notices, current_id, asset_groups=None):
     for ci in range(2, last_col + 1):
         ws.cell(row=r, column=ci).fill = _FILL_NAVY
         if ci >= 3:
-            # Sum all data cells in this column (skip subtotal rows — use raw data)
             col_l = get_column_letter(ci)
             c = ws.cell(row=r, column=ci,
                 value=f'=SUMPRODUCT((A4:A{r - 2}<>"")*({col_l}4:{col_l}{r - 2}))')
@@ -3550,6 +3614,7 @@ def _xs_exposure_sheet(wb, notices, current_id, asset_groups=None):
     for ci in range(3, last_col + 1):
         ws.column_dimensions[get_column_letter(ci)].width = 18
     ws.freeze_panes = 'C4'
+
 
 
 @app.post("/api/export")
@@ -3628,7 +3693,7 @@ async def export_excel(body: dict, request: Request):
             name = f"Notice_{i + 1}_{dt}"[:31]
             _xs_notice_sheet(wb, n, name)
 
-    _xs_wire_sheet(wb, current_notice)
+    _xs_wire_sheet(wb, current_notice, non_voided)
     _xs_exposure_sheet(wb, non_voided, notice_id, ag)
     _xs_commitment_sheet(wb, non_voided, notice_id)
 

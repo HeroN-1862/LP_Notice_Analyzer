@@ -2970,10 +2970,10 @@ function pdfOpenWindow(){
   const title=escH((n.header.notice_title||'Notice')+' — PDF');
   const pc=n.page_count||_pdfPageCount||1;
 
-  // 별도 창 열기 (사용자 클릭 이벤트 내 → 팝업 차단 회피)
   _pdfWin=window.open('','_pdfViewer','width=750,height=900,resizable=yes,scrollbars=yes');
   if(!_pdfWin){alert('팝업이 차단되었습니다. 브라우저 설정에서 팝업을 허용해주세요.');return;}
 
+  const PDFJS_CDN='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155';
   const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${title}</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -2987,7 +2987,9 @@ body{font-family:'Inter','Noto Sans KR',sans-serif;background:#e8e8e8;overflow:h
 canvas{width:100%;display:block}
 .hl{position:absolute;background:rgba(255,220,50,.25);border:2px solid rgba(255,180,0,.7);border-radius:4px;pointer-events:none;transition:all .3s ease;z-index:5;transform:scale(1);box-shadow:0 0 0 rgba(0,0,0,0);display:none}
 .hl.active{transform:scale(1.15) translateY(-2px);box-shadow:0 6px 20px rgba(255,180,0,.3),0 2px 8px rgba(0,0,0,.15);background:rgba(255,220,50,.4);border-color:rgba(255,160,0,.9);z-index:10}
-.loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.9);z-index:2;font-size:13px;color:#9ca3af}
+.loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(255,255,255,.9);z-index:2;font-size:13px;color:#9ca3af;gap:8px}
+.spin{width:20px;height:20px;border:2.5px solid #e2e5ea;border-top-color:#2d7ff9;border-radius:50%;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
 </style></head><body>
 <div class="tb">
   <button onclick="_nav(-1)">◀</button>
@@ -3002,17 +3004,27 @@ canvas{width:100%;display:block}
     <canvas id="cv"></canvas>
     <div class="hl" id="hl"></div>
   </div>
-  <div class="loading" id="ld">PDF 로딩 중...</div>
+  <div class="loading" id="ld"><div class="spin"></div><span>PDF.js 로딩 중...</span></div>
 </div>
-<script>
+<script type="module">
+import * as pdfjsLib from '${PDFJS_CDN}/pdf.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc='${PDFJS_CDN}/pdf.worker.min.mjs';
 let _doc=null,_pg=1,_pc=${pc},_zm=100,_rendering=false;
-
-function init(doc,pg,pc){
-  _doc=doc;_pc=pc;_pg=pg||1;
+window.initFromBytes=async function(buf,pg,pc){
+  _pc=pc;_pg=pg||1;
   document.getElementById('pi').textContent=_pg+' / '+_pc;
-  _render(_pg);
-}
-
+  const ld=document.getElementById('ld');
+  if(ld){ld.querySelector('span').textContent='PDF 파싱 중...';}
+  try{
+    _doc=await pdfjsLib.getDocument({data:buf}).promise;
+    _pc=_doc.numPages;
+    document.getElementById('pi').textContent=_pg+' / '+_pc;
+    _render(_pg);
+  }catch(e){
+    console.error('PDF parse error:',e);
+    if(ld){ld.querySelector('span').textContent='PDF 로드 실패';ld.querySelector('.spin').style.display='none';}
+  }
+};
 async function _render(p){
   if(!_doc||_rendering) return;
   _rendering=true;
@@ -3034,95 +3046,69 @@ async function _render(p){
   }catch(e){console.error(e);}
   _rendering=false;
 }
-
-function _nav(d){
-  const np=_pg+d;
-  if(np<1||np>_pc)return;
-  _pg=np;
+window._nav=function(d){
+  const np=_pg+d;if(np<1||np>_pc)return;_pg=np;
   document.getElementById('hl').style.display='none';
-  document.getElementById('ld').style.display='flex';
+  const ld=document.getElementById('ld');
+  if(ld){ld.querySelector('span').textContent='렌더링 중...';ld.style.display='flex';}
   _render(_pg);
-}
-
-function _zoom(v){
+};
+window._zoom=function(v){
   _zm=parseInt(v);
   document.getElementById('zw').style.width=_zm+'%';
   document.getElementById('zl').textContent=_zm+'%';
   clearTimeout(window._zrt);
   window._zrt=setTimeout(()=>_render(_pg),300);
-}
-
-function _applyHL(loc){
-  if(loc.page!==_pg){
-    _pg=loc.page;
-    document.getElementById('ld').style.display='flex';
-    _render(_pg).then(()=>setTimeout(()=>_posHL(loc),120));
-    return;
-  }
+};
+window._applyHL=function(loc){
+  if(loc.page!==_pg){_pg=loc.page;
+    const ld=document.getElementById('ld');
+    if(ld){ld.querySelector('span').textContent='렌더링 중...';ld.style.display='flex';}
+    _render(_pg).then(()=>setTimeout(()=>_posHL(loc),120));return;}
   _posHL(loc);
-}
-
+};
 function _posHL(loc){
-  const hl=document.getElementById('hl');
-  if(!hl)return;
+  const hl=document.getElementById('hl');if(!hl)return;
   const rowLeft=Math.max(0,Math.min(loc.x_pct,3));
   hl.style.left=rowLeft+'%';
   hl.style.top=Math.max(0,loc.y_pct-0.3)+'%';
   hl.style.width=(97-rowLeft)+'%';
   hl.style.height=Math.max(1.5,loc.h_pct+1)+'%';
-  hl.style.display='block';
-  hl.classList.remove('active');
-  void hl.offsetWidth;
-  hl.classList.add('active');
-  setTimeout(()=>{
-    const cw=document.getElementById('cw');
-    if(cw&&hl.offsetTop)cw.scrollTop=hl.offsetTop-cw.clientHeight/3;
-  },80);
+  hl.style.display='block';hl.classList.remove('active');void hl.offsetWidth;hl.classList.add('active');
+  setTimeout(()=>{const cw=document.getElementById('cw');if(cw&&hl.offsetTop)cw.scrollTop=hl.offsetTop-cw.clientHeight/3;},80);
 }
-
-function _clearHL(){
-  const hl=document.getElementById('hl');
-  if(hl){hl.classList.remove('active');hl.style.display='none';}
-}
-
-function _setTitle(t){
-  document.title=t+' — PDF';
-  const el=document.getElementById('tt');
-  if(el)el.textContent=t;
-}
-
-// 부모 창 닫힘 감지
+window._clearHL=function(){const hl=document.getElementById('hl');if(hl){hl.classList.remove('active');hl.style.display='none';}};
+window._setTitle=function(t){document.title=t+' — PDF';const el=document.getElementById('tt');if(el)el.textContent=t;};
 setInterval(()=>{if(!window.opener||window.opener.closed)document.title='[연결 끊김] '+document.title;},3000);
+window._ready=true;
 ` + '</' + 'script></body></html>';
 
   _pdfWin.document.open();
   _pdfWin.document.write(html);
   _pdfWin.document.close();
 
-  // PDF.js 문서가 이미 로드되어 있으면 바로 전달
-  // 아직 없으면 로드 후 전달
-  const _sendDoc=()=>{
-    if(_pdfDoc && _pdfWin && !_pdfWin.closed){
-      try{ _pdfWin.init(_pdfDoc, _pdfPage, pc); }
-      catch(e){ console.warn('PDF 별도 창 init 실패:', e); }
-    }
+  // PDF bytes -> child window (not _pdfDoc object to avoid font rendering issue)
+  const _sendBytes=async ()=>{
+    if(!_pdfWin||_pdfWin.closed) return;
+    try{
+      const targetId=_pdfNoticeId;
+      let buf=await _idbGet(targetId);
+      if(!buf) buf=await _fetchPdfBytes(targetId);
+      if(!_pdfWin||_pdfWin.closed) return;
+      const _waitReady=setInterval(()=>{
+        if(!_pdfWin||_pdfWin.closed){clearInterval(_waitReady);return;}
+        if(_pdfWin._ready){clearInterval(_waitReady);
+          try{_pdfWin.initFromBytes(buf,_pdfPage,pc);}catch(e){console.warn('PDF child init fail:',e);}
+        }
+      },100);
+      setTimeout(()=>clearInterval(_waitReady),30000);
+    }catch(e){console.warn('PDF bytes send fail:',e);}
   };
-  if(_pdfDoc){
-    setTimeout(_sendDoc, 200); // DOM 렌더 대기
-  } else {
-    // PDF 아직 로딩 중 → pdfRenderPage 완료 후 전달
-    const _waitDoc=setInterval(()=>{
-      if(_pdfDoc){clearInterval(_waitDoc);_sendDoc();}
-    }, 300);
-    setTimeout(()=>clearInterval(_waitDoc), 30000); // 30초 안전 타임아웃
-  }
-
-  // 확대 모드 종료
+  _sendBytes();
   if(_pdfExpanded){_pdfExpanded=false;_pdfZoom=100;}
   R();
 }
 
-// ★ 별도 창에 Notice 변경 전달 (viewNotice에서 호출)
 async function _pdfWinSyncNotice(){
   if(!_pdfWinIsOpen()) return;
   const n=S.notices.find(x=>x.id===S.activeNoticeId);
@@ -3131,29 +3117,14 @@ async function _pdfWinSyncNotice(){
   const pc=n.page_count||1;
   try{
     _pdfWin._setTitle(n.header.notice_title||'Notice');
-    // _pdfDoc이 이미 현재 notice면 바로 전달
-    if(_pdfDoc && _pdfDoc._noticeId===targetId){
-      _pdfWin.init(_pdfDoc, 1, pc);
-      return;
-    }
-    // 아니면 직접 로드 (메인 패널이 렌더하지 않으므로)
-    await window._pdfjsReady;
-    const cached=_pdfCacheGet(targetId);
-    if(cached){
-      _pdfDoc=cached;_pdfDoc._noticeId=targetId;
-      _pdfWin.init(_pdfDoc, 1, pc);
-      return;
-    }
     let buf=await _idbGet(targetId);
     if(!buf) buf=await _fetchPdfBytes(targetId);
-    if(!_pdfWinIsOpen()) return; // 로딩 중 창 닫힘
-    _pdfDoc=await pdfjsLib.getDocument({data:buf}).promise;
-    _pdfDoc._noticeId=targetId;
-    _pdfCacheSet(targetId, _pdfDoc);
+    if(!_pdfWinIsOpen()) return;
     _idbSet(targetId, buf);
-    if(_pdfWinIsOpen()) _pdfWin.init(_pdfDoc, 1, pc);
-  }catch(e){ console.warn('PDF 별도 창 sync 실패:', e); }
+    _pdfWin.initFromBytes(buf, 1, pc);
+  }catch(e){ console.warn('PDF child sync fail:', e); }
 }
+
 
 function highlightPdfItem(itemIdx){
   const n=S.notices.find(x=>x.id===S.activeNoticeId);
@@ -5079,13 +5050,13 @@ function normalizeAssetName(name){
   // 2. PREFIX "TransactionType - " (dash/colon separator) — covers:
   //    "Capital Call - X", "Reallocation Call - X", "Current Distribution - X",
   //    "Deemed Distribution - X", "Distribution - X", "Dist - X"
-  s=s.replace(/^(?:(?:Reallocation|Current|Deemed)\s+)?(?:(?:Capital\s+)?Call|Distribution|Dist)\s*[-\u2013\u2014:]\s*/i,'');
+  s=s.replace(/^(?:(?:Reallocation|Current|Deemed)\s+)?(?:(?:Capital\s+)?Call|Distribution|Dist)\s*[-\u2013—:]\s*/i,'');
   // 2b. PREFIX standalone "Reallocation - X"
-  s=s.replace(/^Reallocation\s*[-\u2013\u2014:]\s*/i,'');
+  s=s.replace(/^Reallocation\s*[-\u2013—:]\s*/i,'');
   // 3. PREFIX "Reallocation of Prior Capital Calls: X", "Return of Capital: X"
-  s=s.replace(/^(?:Reallocation\s+of\s+Prior\s+(?:Capital\s+Calls?|Distributions?)|Return\s+of\s+Capital)\s*[-\u2013\u2014:]\s*/i,'');
+  s=s.replace(/^(?:Reallocation\s+of\s+Prior\s+(?:Capital\s+Calls?|Distributions?)|Return\s+of\s+Capital)\s*[-\u2013—:]\s*/i,'');
   // 4. SUFFIX dash qualifiers: "X - Ticking Fee", "X - Reallocation", etc.
-  s=s.replace(/\s+[-\u2013\u2014]\s+(?:Ticking\s+Fee|Reallocation|Return|Deemed|True[\s-]*Up|Recall|Current|Prior|Subsequent|Distribution|Capital\s+Call).*$/i,'');
+  s=s.replace(/\s+[-\u2013—]\s+(?:Ticking\s+Fee|Reallocation|Return|Deemed|True[\s-]*Up|Recall|Current|Prior|Subsequent|Distribution|Capital\s+Call).*$/i,'');
   // 5. Standalone (Dist)/(Distribution)
   s=s.replace(/\s*\((?:Dist|Distribution)\)\s*$/gi,'');
   return s.trim();
