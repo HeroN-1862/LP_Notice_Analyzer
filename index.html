@@ -2762,6 +2762,10 @@ let _pdfWin=null; // ★ 별도 창 참조 (window.open)
 const _pdfCache=new Map(); // noticeId → pdfDoc
 const PDF_CACHE_MAX=5;
 
+// ★ Raw PDF bytes 캐시 — 별도 창에 전달할 때 재사용 (네트워크 재요청 방지)
+const _pdfBytesMap=new Map(); // noticeId → ArrayBuffer
+function _pdfBytesSet(id,buf){_pdfBytesMap.set(id,buf);if(_pdfBytesMap.size>PDF_CACHE_MAX){_pdfBytesMap.delete(_pdfBytesMap.keys().next().value);}}
+
 function _pdfCacheGet(noticeId){
   if(!_pdfCache.has(noticeId)) return null;
   const doc=_pdfCache.get(noticeId);
@@ -2964,6 +2968,7 @@ async function pdfRenderPage(pageNum){
         if(_pdfNoticeId !== targetId) return; // ★ stale 체크
         _idbSet(targetId, buf); // fire-and-forget 저장
       }
+      _pdfBytesSet(targetId, buf); // ★ 메모리 바이트 캐시 (별도 창용)
       _pdfDoc = await pdfjsLib.getDocument({data: buf}).promise;
       if(_pdfNoticeId !== targetId) return; // ★ stale 체크
       _pdfDoc._noticeId = targetId;
@@ -3179,8 +3184,11 @@ async function _render(p){
     await page.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
     if(ld)ld.style.display='none';
     document.getElementById('pi').textContent=p+' / '+_pc;
-  }catch(e){console.error(e);}
-  _rendering=false;
+  }catch(e){
+    console.error(e);
+    const ld=document.getElementById('ld');
+    if(ld){ld.querySelector('span').textContent='렌더링 실패';ld.querySelector('.spin').style.display='none';}
+  }finally{_rendering=false;}
 }
 window._nav=function(d){
   const np=_pg+d;if(np<1||np>_pc)return;_pg=np;
@@ -3229,24 +3237,36 @@ window._ready=true;
   _pdfWin.document.write(html);
   _pdfWin.document.close();
 
-  // PDF bytes -> child window (not _pdfDoc object to avoid font rendering issue)
+  // ★ PDF bytes → child window (메모리 바이트 캐시 → IDB → 네트워크 순)
   const _sendBytes=async ()=>{
     if(!_pdfWin||_pdfWin.closed) return;
     try{
       const targetId=_pdfNoticeId;
-      let buf=await _idbGet(targetId);
+      // ★ 메모리 바이트 캐시 우선 (메인 패널이 이미 로드한 바이트 재사용)
+      let buf=_pdfBytesMap.get(targetId);
+      if(!buf) buf=await _idbGet(targetId);
       if(!buf) buf=await _fetchPdfBytes(targetId);
+      if(!buf) throw new Error('PDF 바이트를 가져올 수 없음');
       if(!_pdfWin||_pdfWin.closed) return;
+      _pdfBytesSet(targetId, buf); // 캐시 갱신
       const _waitReady=setInterval(()=>{
         if(!_pdfWin||_pdfWin.closed){clearInterval(_waitReady);return;}
         if(_pdfWin._ready){clearInterval(_waitReady);
-          try{_pdfWin.initFromBytes(buf,_pdfPage,pc);}catch(e){console.warn('PDF child init fail:',e);}
+          try{_pdfWin.initFromBytes(buf,_pdfPage,pc);}catch(e){
+            console.warn('PDF child init fail:',e);
+            if(_pdfWin&&!_pdfWin.closed){try{_pdfWin._showError('PDF 초기화 실패');}catch(x){}}
+          }
         }
       },100);
-      setTimeout(()=>clearInterval(_waitReady),30000);
+      setTimeout(()=>{
+        clearInterval(_waitReady);
+        // ★ 30초 후에도 _ready 안 됨 → PDF.js 로드 실패
+        if(_pdfWin&&!_pdfWin.closed&&!_pdfWin._ready){
+          try{_pdfWin._showError('PDF.js 로드 시간 초과');}catch(x){}
+        }
+      },30000);
     }catch(e){
       console.warn('PDF bytes send fail:',e);
-      // ★ Fix 2: 자식 창에 에러 전달
       if(_pdfWin&&!_pdfWin.closed){try{_pdfWin._showError('PDF 로드 실패: '+e.message);}catch(x){}}
     }
   };
@@ -3262,10 +3282,13 @@ async function _pdfWinSyncNotice(){
   const pc=n.page_count||1;
   try{
     _pdfWin._setTitle(n.header.notice_title||'Notice');
-    let buf=await _idbGet(targetId);
+    // ★ 메모리 바이트 캐시 우선
+    let buf=_pdfBytesMap.get(targetId);
+    if(!buf) buf=await _idbGet(targetId);
     if(!buf) buf=await _fetchPdfBytes(targetId);
+    if(!buf) throw new Error('PDF 바이트를 가져올 수 없음');
     if(!_pdfWinIsOpen()) return;
-    _idbSet(targetId, buf);
+    _pdfBytesSet(targetId, buf);
     _pdfWin.initFromBytes(buf, 1, pc);
   }catch(e){
     console.warn('PDF child sync fail:', e);
