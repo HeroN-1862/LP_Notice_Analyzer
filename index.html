@@ -2447,7 +2447,8 @@ function renderResultPG(hEl,bEl){
       ${fundFullDisplay?`<div style="font-size:12px;color:var(--t1);margin-top:2px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escH(fundFullDisplay)}">${escH(fundFullDisplay)}</div>`:''}
     </div>
     <div style="flex-shrink:0;text-align:right;font-size:11px;color:var(--t2);line-height:1.7;max-width:40%">
-      <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escH(h.LP_Name_full||h.LP_Name_short||'N/A')}${h.LP_code&&h.LP_code!=='N/A'?' · '+h.LP_code:''}">LP: ${escH(h.LP_Name_full||h.LP_Name_short||'N/A')}${h.LP_code&&h.LP_code!=='N/A'?' · '+escH(h.LP_code):''}</div>
+      ${S.editMode?`<div style="display:flex;gap:4px;align-items:center;justify-content:flex-end"><span style="color:var(--t3);flex-shrink:0">LP:</span><input class="edit-cell" style="font-size:11px;width:180px;text-align:right" value="${escH(h.LP_Name_full||'')}" onchange="editHeaderText('LP_Name_full',this.value)" placeholder="LP Name"/><input class="edit-cell" style="font-size:11px;width:80px;text-align:right" value="${escH(h.LP_code||'')}" onchange="editHeaderText('LP_code',this.value)" placeholder="LP Code"/></div>`
+      :`<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escH(h.LP_Name_full||h.LP_Name_short||'N/A')}${h.LP_code&&h.LP_code!=='N/A'?' · '+h.LP_code:''}">LP: ${escH(h.LP_Name_full||h.LP_Name_short||'N/A')}${h.LP_code&&h.LP_code!=='N/A'?' · '+escH(h.LP_code):''}</div>`}
       <div style="color:var(--t1)">Issue: ${fmtDate(h.issue_date)||'N/A'} · Due: ${fmtDate(h.due_date)||'N/A'}</div>
     </div>
     <div style="display:flex;gap:6px;flex-shrink:0">
@@ -3324,7 +3325,8 @@ function rDashboard(h,items){
         <div style="display:flex;align-items:flex-start;gap:12px">
           <div style="flex:1">
             <div class="hero-label">Net Amount <span class="tg ${typeBadge}" style="border-radius:10px;padding:1px 7px;font-size:10px">${h.notice_type||'N/A'}</span></div>
-            <div class="hero-val">${fA(netAmt)}</div>
+            ${S.editMode?`<input class="edit-cell" style="font-size:20px;font-weight:700;width:100%;text-align:left" value="${netAmt??''}" onchange="editHeaderNum('LP_net_amount',this.value)"/>`
+            :`<div class="hero-val">${fA(netAmt)}</div>`}
             <div class="hero-meta">
               ${S.editMode
                 ?`<span>Issue: <input type="date" value="${fmtDate(h.issue_date)||''}" onchange="editHeaderDate('issue_date',this.value)" style="font-size:11px;border:1px solid var(--bdr);border-radius:3px;padding:1px 4px;background:var(--bg0);color:var(--t1)"/></span>
@@ -3346,11 +3348,13 @@ function rDashboard(h,items){
         </div>
         <div class="sec-card">
           <div class="sc-label">Commitment</div>
-          <div class="sc-val">${fA(commit)}</div>
+          ${S.editMode?`<input class="edit-cell" style="text-align:right;font-size:13px;font-weight:600;width:100%" value="${commit??''}" onchange="editHeaderNum('Commitment_original',this.value)"/>`
+          :`<div class="sc-val">${fA(commit)}</div>`}
         </div>
         <div class="sec-card">
           <div class="sc-label">Unfunded Prior</div>
-          <div class="sc-val">${fA(unfPrior)}</div>
+          ${S.editMode?`<input class="edit-cell" style="text-align:right;font-size:13px;font-weight:600;width:100%" value="${unfPrior??''}" onchange="editHeaderNum('Unfunded_prior',this.value)"/>`
+          :`<div class="sc-val">${fA(unfPrior)}</div>`}
         </div>
         <div class="sec-card">
           <div class="sc-label">Sub Total (약정 영향)</div>
@@ -3358,7 +3362,8 @@ function rDashboard(h,items){
         </div>
         <div class="sec-card">
           <div class="sc-label">Unfunded After</div>
-          <div class="sc-val">${fA(unfAfter)}</div>
+          ${S.editMode?`<input class="edit-cell" style="text-align:right;font-size:13px;font-weight:600;width:100%" value="${unfAfter??''}" onchange="editHeaderNum('Unfunded_after',this.value)"/>`
+          :`<div class="sc-val">${fA(unfAfter)}</div>`}
         </div>
       </div>
     </div>
@@ -3375,7 +3380,7 @@ function rItems(items){
       <span style="font-size:11px;color:var(--t3)">${ri.length}개 항목</span>
       ${_userRole!=='viewer'?`<button class="btn btn-sm ${em?'btn-p':'btn-s'}" style="font-size:11px;padding:3px 10px" onclick="toggleEditMode()">${em?'✓ 편집 완료':'✏️ 편집'}</button>`:''}
     </div></div>
-    ${em?'<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:rgba(30,58,95,.06);border:1px solid rgba(30,58,95,.18);border-radius:5px;margin-bottom:8px;font-size:11px;color:#1e3a5f;font-weight:500"><span style="font-size:13px">✏️</span> 편집 모드 — 항목명, 금액, Issue/Due Date를 수정할 수 있습니다. Type/Commit은 클릭으로 전환합니다.</div>':''}
+    ${em?'<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:rgba(30,58,95,.06);border:1px solid rgba(30,58,95,.18);border-radius:5px;margin-bottom:8px;font-size:11px;color:#1e3a5f;font-weight:500"><span style="font-size:13px">✏️</span> 편집 모드 — 항목명, 금액, LP 정보, Commitment, Unfunded, 날짜를 수정할 수 있습니다. Type/Commit은 클릭으로 전환합니다.</div>':''}
     <div class="tw" style="${em?'border:2px solid #1e3a5f;border-radius:var(--r)':''}"><table class="it"><thead><tr><th style="width:32px">#</th><th>Item</th><th style="text-align:right">LP Amount</th><th style="text-align:center">Type</th><th style="text-align:center;width:52px">Commit</th><th style="text-align:center;width:32px" title="PDF 매칭 신뢰도">📍</th></tr></thead>
     <tbody>${ri.map((it,i)=>{
       const origIdx=(items||[]).indexOf(it);
@@ -3448,10 +3453,22 @@ function toggleEditMode(){
       // Save line items
       authFetch(`${API}/api/notices/${n.id}/items`,{method:'PUT',headers:{'Content-Type':'application/json'},
         body:JSON.stringify(n.lineItems)}).catch(e=>console.warn('Save failed:',e));
-      // Save header dates if modified during edit
+      // Save header fields if modified during edit
       if(n._headerDirty){
+        const hSave={};
+        // 날짜 필드
+        ['issue_date','due_date'].forEach(k=>{if(n.header[k]!==undefined)hSave[k]=n.header[k];});
+        // ★ 숫자 필드 (Commitment, Unfunded, Net Amount 등)
+        ['LP_net_amount','Commitment_original','Unfunded_prior','Unfunded_after',
+         'Current_Commit_Contribution','Current_Commit_Distribution',
+         'CumContribPrior','CumContribAfter','CumDistribPrior','CumDistribAfter',
+         'pct_LP_Interest'].forEach(k=>{if(n.header[k]!==undefined)hSave[k]=n.header[k];});
+        // ★ 텍스트 필드 (LP 정보 등)
+        ['LP_Name_full','LP_Name_short','LP_code',
+         'Underlying_Fund_Name_full','Underlying_Fund_Name_short',
+         'notice_title','notice_number','Investment_Class'].forEach(k=>{if(n.header[k]!==undefined)hSave[k]=n.header[k];});
         authFetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({issue_date:n.header.issue_date, due_date:n.header.due_date})}).catch(e=>console.warn('Header save failed:',e));
+          body:JSON.stringify(hSave)}).catch(e=>console.warn('Header save failed:',e));
         delete n._headerDirty;
       }
     }
@@ -3464,6 +3481,27 @@ function editHeaderDate(field,value){
   n.header[field]=value||'N/A';
   n._headerDirty=true;
   n._statusCache=null;
+}
+
+// ★ 편집 모드 — header 숫자 필드 인라인 수정
+function editHeaderNum(field,value){
+  const n=S.notices.find(x=>x.id===S.activeNoticeId);if(!n)return;
+  const clean=String(value).replace(/[,$\s]/g,'').replace(/\(([^)]+)\)/,'-$1');
+  const num=parseFloat(clean);
+  n.header[field]=isNaN(num)?null:num;
+  n._headerDirty=true;
+  n._statusCache=null;
+  R(); // 대시보드 + 검증 즉시 갱신
+}
+
+// ★ 편집 모드 — header 텍스트 필드 인라인 수정
+function editHeaderText(field,value){
+  const n=S.notices.find(x=>x.id===S.activeNoticeId);if(!n)return;
+  n.header[field]=value||'N/A';
+  n._headerDirty=true;
+  if(field==='LP_Name_full'||field==='LP_code'){
+    normalizeNames(n.header);
+  }
 }
 
 function editItem(idx,field,value){
