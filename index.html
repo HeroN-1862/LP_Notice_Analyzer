@@ -2722,7 +2722,8 @@ const PDF_CACHE_MAX=5;
 
 // ★ Raw PDF bytes 캐시 — 별도 창에 전달할 때 재사용 (네트워크 재요청 방지)
 const _pdfBytesMap=new Map(); // noticeId → ArrayBuffer
-function _pdfBytesSet(id,buf){_pdfBytesMap.set(id,buf);if(_pdfBytesMap.size>PDF_CACHE_MAX){_pdfBytesMap.delete(_pdfBytesMap.keys().next().value);}}
+// ★ buf.slice(0): PDF.js getDocument()가 Worker로 transfer 시 원본 ArrayBuffer가 detach되므로 독립 복사본 저장
+function _pdfBytesSet(id,buf){_pdfBytesMap.set(id,buf.slice(0));if(_pdfBytesMap.size>PDF_CACHE_MAX){_pdfBytesMap.delete(_pdfBytesMap.keys().next().value);}}
 
 function _pdfCacheGet(noticeId){
   if(!_pdfCache.has(noticeId)) return null;
@@ -3173,9 +3174,9 @@ window._ready=true;
     if(!_pdfWin||_pdfWin.closed) return;
     try{
       const targetId=_pdfNoticeId;
-      // ★ 메모리 바이트 캐시 우선 (메인 패널이 이미 로드한 바이트 재사용)
+      // ★ 메모리 바이트 캐시 우선 (detached ArrayBuffer 방어: byteLength===0 체크)
       let buf=_pdfBytesMap.get(targetId);
-      if(!buf) buf=await _idbGet(targetId);
+      if(!buf||buf.byteLength===0) buf=await _idbGet(targetId);
       if(!buf) buf=await _fetchPdfBytes(targetId);
       if(!buf) throw new Error('PDF 바이트를 가져올 수 없음');
       if(!_pdfWin||_pdfWin.closed) return;
@@ -3213,9 +3214,9 @@ async function _pdfWinSyncNotice(){
   const pc=n.page_count||1;
   try{
     _pdfWin._setTitle(n.header.notice_title||'Notice');
-    // ★ 메모리 바이트 캐시 우선
+    // ★ 메모리 바이트 캐시 우선 (detached ArrayBuffer 방어: byteLength===0 체크)
     let buf=_pdfBytesMap.get(targetId);
-    if(!buf) buf=await _idbGet(targetId);
+    if(!buf||buf.byteLength===0) buf=await _idbGet(targetId);
     if(!buf) buf=await _fetchPdfBytes(targetId);
     if(!buf) throw new Error('PDF 바이트를 가져올 수 없음');
     if(!_pdfWinIsOpen()) return;
