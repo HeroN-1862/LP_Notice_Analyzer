@@ -4,19 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LP Notice Analyzer</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<!-- PDF.js for client-side PDF rendering (no server-side poppler needed) -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.mjs" type="module"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700&family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<!-- PDF.js — loaded via dynamic import below -->
 <script>
   window._pdfjsReady = import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.mjs').then(m => {
     m.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.worker.min.mjs';
     window.pdfjsLib = m;
   });
 </script>
-<!-- SheetJS for Excel/CSV export -->
-<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
-<!-- JSZip for CSV multi-file export -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
 :root{
   --bg0:#f5f6f8;--bg1:#ffffff;--bg2:#ffffff;--bg3:#f9fafb;--bg4:#f0f2f5;
@@ -32,7 +27,6 @@
   --slate:#64748b;--slate-d:rgba(100,116,139,.08);
   --r:7px;--rl:11px;
   --f:'Inter','Noto Sans KR',sans-serif;
-  --fm:'JetBrains Mono',monospace;
   --sw:248px;
 }
 *{margin:0;padding:0;box-sizing:border-box}
@@ -84,8 +78,6 @@ body{font-family:var(--f);background:var(--bg0);color:var(--t1);min-height:100vh
 .pt-notice[draggable=true]:active{cursor:grabbing}
 .pt-notice.dragging{opacity:.3}
 .pt-fund-h.drag-over{background:rgba(37,99,235,.08);border:1px dashed var(--blue);border-radius:var(--r)}
-.drop-indicator{padding:6px 12px;margin:4px 0;border:2px dashed var(--blue);border-radius:var(--r);background:rgba(45,127,249,.06);color:var(--blue);font-size:11px;text-align:center;display:none}
-.drop-indicator.visible{display:block}
 
 .sb-foot{padding:10px 12px;border-top:1px solid var(--bdr);font-size:11px;color:var(--t3)}
 .sb-foot .mdl{;font-size:11px;color:var(--teal);font-weight:500}
@@ -311,14 +303,6 @@ details>summary{list-style:none}details>summary::-webkit-details-marker{display:
 .dash-c .dc-sub{font-size:11px;color:var(--t3);margin-top:3px}
 
 /* Portfolio tree */
-.fund-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px}
-.fund-tab{padding:7px 14px;border-radius:20px;font-size:11px;font-weight:600;color:var(--t2);background:var(--bg2);border:1px solid var(--bdr);cursor:pointer;transition:all .15s;display:flex;align-items:center;gap:6px;white-space:nowrap}
-.fund-tab:hover{border-color:var(--t3);color:var(--t1)}
-.fund-tab.act{background:var(--blue);border-color:var(--blue);color:#fff}
-.fund-tab .ft-cnt{font-size:11px;opacity:.7;font-weight:500}
-.fund-tab.act .ft-cnt{opacity:.85}
-.fund-tab[ondragover]{transition:all .15s}
-.fund-tab.drag-over{background:rgba(45,127,249,.25);border-color:var(--blue);color:var(--t1)}
 
 .ptree{margin-bottom:20px}
 .pt-fund{background:var(--bg2);border:1px solid var(--bdr);border-radius:var(--r);margin-bottom:8px;overflow:hidden}
@@ -2289,32 +2273,6 @@ function handleNoticeDragEnd(e){
   document.querySelectorAll('.drag-over').forEach(el=>el.classList.remove('drag-over'));
 }
 
-function handleNoticeDrop(e,fundIdx){
-  e.preventDefault();
-  if(_isFundDrag) return; // fund drags handled by handleFundHeaderDrop
-
-  const noticeId=_dragNoticeId||e.dataTransfer.getData('text/plain');
-  if(!noticeId) return;
-  const notice=S.notices.find(n=>n.id===noticeId);
-  const targetFund=window._fundBtnNames?.[fundIdx]||window._fundNames?.[fundIdx];
-  if(!notice||!targetFund) return;
-
-  // Skip if already in same fund
-  if(getFundKey(notice.header)===(targetFund.idKey||makeFundIdKey(targetFund.full))) return;
-
-  const targetIdKey=targetFund.idKey||makeFundIdKey(targetFund.full);
-  notice.header.Underlying_Fund_Name_full=targetFund.full;
-  notice.header.Underlying_Fund_Name_short=targetFund.short;
-  notice.header.Fund_ID_Key=targetIdKey;
-  regName(S.nameReg.fund, targetFund.full, targetFund.short);
-
-  // Save to backend
-  authFetch(`${API}/api/notices/${noticeId}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({Underlying_Fund_Name_full:targetFund.full,Underlying_Fund_Name_short:targetFund.short,Fund_ID_Key:targetIdKey})}).catch(()=>{});
-
-  _dragNoticeId=null;
-  R();
-}
 
 /* ===== DRAG & DROP: Fund → Fund (merge) ===== */
 let _isFundDrag=false;
@@ -3028,34 +2986,7 @@ function pdfNav(dir){
   if(nav) nav.textContent=`${_pdfPage} / ${_pdfPageCount}`;
 }
 
-function pdfToggleExpand(){
-  _pdfExpanded=!_pdfExpanded;
-  if(_pdfExpanded) _pdfZoom=120;
-  else _pdfZoom=100;
-  R();
-}
 
-let _pdfZoomRenderTimer=null;
-function pdfZoomSlide(val){
-  _pdfZoom=parseInt(val);
-  const wrap=document.getElementById('pdfZoomWrap');
-  if(wrap) wrap.style.width=_pdfZoom+'%';
-  const lbl=document.getElementById('pdfZoomLabel');
-  if(lbl) lbl.textContent=_pdfZoom+'%';
-  // Debounce re-render (don't render on every pixel of slider drag)
-  clearTimeout(_pdfZoomRenderTimer);
-  _pdfZoomRenderTimer=setTimeout(()=>pdfRenderPage(_pdfPage),300);
-}
-function pdfZoomSet(val){
-  _pdfZoom=val;
-  const wrap=document.getElementById('pdfZoomWrap');
-  if(wrap) wrap.style.width=_pdfZoom+'%';
-  const slider=document.getElementById('pdfZoomSlider');
-  if(slider) slider.value=_pdfZoom;
-  const lbl=document.getElementById('pdfZoomLabel');
-  if(lbl) lbl.textContent=_pdfZoom+'%';
-  pdfRenderPage(_pdfPage);
-}
 
 /* Drag toolbar to move the expanded window */
 let _dragWin=null;
@@ -3404,20 +3335,6 @@ async function sendQa(){
   setTimeout(()=>{const el=document.getElementById('qaMsgs');if(el)el.scrollTop=el.scrollHeight;},50);
 }
 
-function rOverview(h){
-  const f=[['Notice Number',h.notice_number],['Notice Title',h.notice_title],['Issue Date',h.issue_date],['Due Date',h.due_date],
-    ['LP Name (Full)',h.LP_Name_full],['LP Name (Short)',h.LP_Name_short],['LP Code',h.LP_code],
-    ['Fund Name (Full)',h.Underlying_Fund_Name_full],['Fund Name (Short)',h.Underlying_Fund_Name_short],['Fund ID Key',h.Fund_ID_Key],
-    ['Fund GP',h.Underlying_Fund_GP_Name],['Investment Class',h.Investment_Class],['Type',h.notice_type]];
-  const n=[['LP Net Amount',h.LP_net_amount],['Commitment',h.Commitment_original],['Unfunded Prior',h.Unfunded_prior],['Unfunded After',h.Unfunded_after],
-    ['Commit Contrib',h.Current_Commit_Contribution],['Commit Distrib',h.Current_Commit_Distribution],
-    ['CumContrib Prior',h.CumContribPrior],['CumContrib After',h.CumContribAfter],
-    ['CumDistrib Prior',h.CumDistribPrior],['CumDistrib After',h.CumDistribAfter],['LP Interest %',h.pct_LP_Interest]];
-  return`<div class="sec"><div class="sh"><div class="st"><span class="nm">1</span> 기본 정보</div></div>
-    <div class="dg">${f.map(([l,v])=>`<div class="dc ed" onclick="eF('${l}')"><div class="dl">${l}</div><div class="dv ${(!v||v==='N/A')?'na':''}">${v||'N/A'}</div></div>`).join('')}</div></div>
-    <div class="sec"><div class="sh"><div class="st"><span class="nm">2</span> 금액</div></div>
-    <div class="dg">${n.map(([l,v])=>`<div class="dc ed" onclick="eF('${l}')"><div class="dl">${l}</div><div class="dv mo ${(!v&&v!==0||v==='N/A')?'na':''} ${typeof v==='number'&&v<0?'an':''}">${fA(v)}</div></div>`).join('')}</div></div>`;
-}
 
 function rDashboard(h,items){
   const ri=realItems(items);
@@ -6105,51 +6022,6 @@ async function generateExport(){
 }
 
 /* Merge this fund into another fund group — unifies Fund_ID_Key so they group together */
-function mergeFund(srcFundIdx){
-  const tree=buildTree();
-  if(srcFundIdx<0||srcFundIdx>=tree.length) return;
-  const src=tree[srcFundIdx];
-
-  // Collect all notice IDs in source fund
-  const srcNoticeIds=new Set();
-  src.lps.forEach(lp=>lp.classes.forEach(cls=>cls.notices.forEach(n=>srcNoticeIds.add(n.id))));
-
-  // Build list of other funds
-  const others=tree.filter((_,i)=>i!==srcFundIdx);
-  if(!others.length){alert('병합할 다른 펀드가 없습니다.');return;}
-
-  const choices=others.map((f,i)=>`${i+1}. ${f.displayName} (${f.noticeCount}건)`).join('\n');
-  const input=prompt(`"${src.displayName}" (${srcNoticeIds.size}건)을 다른 펀드에 병합합니다.\n\n병합 대상 번호:\n${choices}`);
-  if(!input) return;
-  const idx=parseInt(input)-1;
-  if(isNaN(idx)||idx<0||idx>=others.length){alert('유효하지 않은 번호입니다.');return;}
-
-  const target=others[idx];
-  // Get target's Fund_ID_Key from its first notice
-  let targetFundIdKey='', targetFullName=target.fullName, targetShortName=target.displayName;
-  target.lps.forEach(lp=>lp.classes.forEach(cls=>cls.notices.forEach(n=>{
-    if(!targetFundIdKey && n.header.Fund_ID_Key) targetFundIdKey=n.header.Fund_ID_Key;
-  })));
-  if(!targetFundIdKey) targetFundIdKey=makeFundIdKey(targetFullName);
-
-  // Update all source notices to match target
-  let count=0;
-  S.notices.forEach(n=>{
-    if(!srcNoticeIds.has(n.id)) return;
-    n.header.Fund_ID_Key=targetFundIdKey;
-    n.header.Underlying_Fund_Name_full=targetFullName;
-    n.header.Underlying_Fund_Name_short=targetShortName;
-    authFetch(`${API}/api/notices/${n.id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({Fund_ID_Key:targetFundIdKey, Underlying_Fund_Name_full:targetFullName, Underlying_Fund_Name_short:targetShortName})}).catch(()=>{});
-    count++;
-  });
-
-  S.nameReg.fund[targetFullName]=targetShortName;
-  if(src.fullName!==targetFullName) delete S.nameReg.fund[src.fullName];
-
-  alert(`${count}건 Notice → "${targetShortName}" 병합 완료`);
-  R();
-}
 
 /* Auto-merge duplicate funds detected by same displayName */
 function autoMergeDupeFunds(fundIdxs){
@@ -6480,58 +6352,6 @@ function submitLp(){
   S.showLpModal=false;R();
 }
 
-function autoFillLp(mode){
-  /* mode='name': copy LP_code → LP_Name_full
-     mode='code': copy LP_Name_full → LP_code */
-  const n=S.notices.find(x=>x.id===S.activeNoticeId);
-  if(!n) return;
-  const h=n.header;
-  const fundKey=getFundKey(h);
-  const updated=[n.id];
-
-  if(mode==='name'){
-    // LP Code exists, Name missing → use code as name
-    const code=h.LP_code||'';
-    if(!code||code==='N/A') return;
-    h.LP_Name_full=code;
-    h.LP_Name_short=code;
-    regName(S.nameReg.lp, code, code);
-    // Propagate to same-fund notices with missing LP name
-    S.notices.forEach(other=>{
-      if(other.id===n.id) return;
-      if(getFundKey(other.header)!==fundKey) return;
-      const lf=other.header.LP_Name_full;
-      if(lf&&lf!=='N/A'&&lf!=='Unknown LP') return;
-      other.header.LP_Name_full=code;
-      other.header.LP_Name_short=code;
-      updated.push(other.id);
-    });
-    updated.forEach(id=>{
-      authFetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({LP_Name_full:code, LP_Name_short:code})}).catch(()=>{});
-    });
-  } else if(mode==='code'){
-    // LP Name exists, Code missing → use name as code
-    const name=h.LP_Name_full||'';
-    if(!name||name==='N/A') return;
-    h.LP_code=name;
-    // Propagate to same-fund notices with missing LP code
-    S.notices.forEach(other=>{
-      if(other.id===n.id) return;
-      if(getFundKey(other.header)!==fundKey) return;
-      const lc=other.header.LP_code;
-      if(lc&&lc!=='N/A') return;
-      other.header.LP_code=name;
-      updated.push(other.id);
-    });
-    updated.forEach(id=>{
-      authFetch(`${API}/api/notices/${id}/header`,{method:'PUT',headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({LP_code:name})}).catch(()=>{});
-    });
-  }
-  syncNames();
-  R();
-}
 
 function deleteNotice(id){
   if(_userRole==='viewer') return;
@@ -7081,10 +6901,23 @@ function rDuplicatePopup(){
 }
 
 function retryJob(jobId){
-  // Can't retry in backend mode without file — remove job
-  alert('파일을 다시 업로드해주세요.');
-  S.jobs=S.jobs.filter(j=>j.id!==jobId);
-  R();
+  const job=S.jobs.find(j=>j.id===jobId);
+  if(!job) return;
+  if(job._file){
+    // 원본 파일이 메모리에 보존됨 → 진짜 재시도
+    job.status='reading';
+    job.error='';job.errorDetail='';
+    job._retries=0;
+    job.t0=Date.now();job.tReadDone=null;job.tParsingStart=null;
+    job.tApiDone=null;job.tDone=null;job.tokens=null;
+    job._gotParsing=false;job._lastHeartbeat=0;
+    R();
+    uploadToBackend(job);
+  } else {
+    alert('원본 파일 참조가 해제되어 재시도할 수 없습니다.\n파일을 다시 업로드해주세요.');
+    S.jobs=S.jobs.filter(j=>j.id!==jobId);
+    R();
+  }
 }
 
 /* ===== MULTI-LP (OMNIBUS) NOTICE POPUP ===== */

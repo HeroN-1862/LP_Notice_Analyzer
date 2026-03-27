@@ -141,10 +141,6 @@ def load_pdf(notice_id: str) -> bytes:
     except Exception:
         return None
 
-def pdf_exists(notice_id: str) -> bool:
-    """Check if PDF exists in storage."""
-    return load_pdf(notice_id) is not None
-
 def store_text_map(notice_id: str, text_map: list):
     """Save text_map.json to Supabase Storage."""
     data = json.dumps(text_map, ensure_ascii=False).encode("utf-8")
