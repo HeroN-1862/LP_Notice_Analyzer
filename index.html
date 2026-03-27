@@ -712,7 +712,7 @@ function renderSB(){
     <div class="sb-head"><div class="sb-logo" onclick="if(_session){S.page=(S.notices.length||_userRole==='admin')?'portfolio':'upload';S.activeNoticeId=null;R();}else{location.reload();}" style="cursor:pointer" title="홈"><i>N</i><span>Notice Analyzer</span></div></div>
     <div style="padding:4px 6px 0">
       <div class="sb-gl">메뉴</div>
-      <div class="sb-it ${S.page==='upload'?'act':''} ${!S.connected||_userRole==='viewer'?'dis':''}" onclick="${_userRole==='viewer'?'alert(&quot;열람 전용 계정입니다&quot;)':'go(&quot;upload&quot;)'}" ${_userRole==='viewer'?'title="열람 전용 계정"':''}><span class="ic">+</span><span>PDF 업로드</span>${uploadBadge}</div>
+      <div class="sb-it ${S.page==='upload'?'act':''} ${!S.connected||_userRole==='viewer'?'dis':''}" onclick="${_userRole==='viewer'?'alert(&quot;열람 전용 계정입니다&quot;)':'go(&quot;upload&quot;)'}" ${_userRole==='viewer'?'title="열람 전용 계정"':''}><span class="ic">+</span><span>PDF 업로드</span><span id="sbUploadBadge">${uploadBadge}</span></div>
       <div id="sbPortfolioBtn" class="sb-it ${S.page==='portfolio'?'act':''} ${!notices.length&&_userRole!=='admin'&&!S._portfolioLoading?'dis':''}" onclick="go('portfolio')"><span class="ic">◈</span><span>Portfolio</span>
         ${S._portfolioLoading?'<span style="font-size:10px;color:var(--t3);margin-left:4px">로딩 중...</span>'
           :notices.length?`<span class="badge ok">${notices.length}</span>`:''}</div>
@@ -970,7 +970,7 @@ function renderPG(){
   switch(S.page){
     case'settings':h.innerHTML='<h1>설정</h1><p>서버 연결 · AI 모델 · 개인 설정</p>';b.innerHTML=pgSettings();loadGeminiModels();loadOrgList();loadOrgRequestStatus();break;
     case'upload':h.innerHTML='<h1>PDF 업로드</h1><p>Notice PDF를 업로드하면 자동 분석 후 누적 관리됩니다</p>';b.innerHTML=(S._portfolioLoading?'<div style="display:flex;align-items:center;gap:8px;padding:12px 16px;background:var(--indigo-d);border:1px solid rgba(29,53,87,.15);border-radius:var(--r);margin-bottom:16px;font-size:12px;color:var(--indigo)"><div class="spin-s"></div>Portfolio 로딩 중...</div>':'')+pgUpload();if(_userRole==='admin'&&!S._adminOrgs.length)loadAdminOrgs();break;
-    case'portfolio':h.innerHTML=`<h1>Portfolio Overview</h1><p>${S.notices.length}건의 Notice · Fund → LP → Class 계층 구조</p>`;b.innerHTML=(_userRole==='admin'?pgAdminOrgCards():'')+pgPortfolio();if(_userRole==='admin'){if(!S._adminOrgs.length)loadAdminOrgs();if(!S.notices.length&&!S._adminOrgFilter)adminFilterOrg('all');}break;
+    case'portfolio':h.innerHTML=`<div style="display:flex;align-items:center;justify-content:space-between;width:100%"><div><h1>Portfolio Overview</h1><p>${S.notices.length}건의 Notice · Fund → LP → Class 계층 구조</p></div>${_userRole!=='viewer'?`<div onclick="_ensureQuickUpload();document.getElementById('_quickUpload').click()" style="padding:6px 16px;font-size:12px;font-weight:600;background:var(--bg2);color:var(--t2);border:1px solid var(--bdr);border-radius:6px;cursor:pointer;white-space:nowrap;transition:all .15s;display:flex;align-items:center;gap:5px;flex-shrink:0" onmouseover="this.style.borderColor='var(--indigo)';this.style.color='var(--indigo)'" onmouseout="this.style.borderColor='var(--bdr)';this.style.color='var(--t2)'" title="Notice PDF 업로드">+ PDF 업로드</div>`:''}</div>`;b.innerHTML=(_userRole==='admin'?pgAdminOrgCards():'')+pgPortfolio();if(_userRole==='admin'){if(!S._adminOrgs.length)loadAdminOrgs();if(!S.notices.length&&!S._adminOrgFilter)adminFilterOrg('all');}break;
     case'favorites':h.innerHTML='<h1>★ 담당 펀드 설정</h1><p>관심 펀드를 선택하면 사이드바에 해당 펀드의 Notice만 표시됩니다</p>';b.innerHTML=pgFavorites();break;
     case'result':renderResultPG(h,b);break;
     case'admin':h.innerHTML='<h1>사용자 관리</h1><p>가입된 사용자 목록 및 데이터 관리</p>';b.innerHTML=pgAdmin();if(!S._adminUsers.length)loadAdminUsers();loadAdminOrgRequests();break;
@@ -2545,12 +2545,8 @@ function renderResultPG(hEl,bEl){
       ${_userRole!=='viewer'?`<div onclick="document.getElementById('_quickUpload').click()" style="padding:5px 14px;font-size:11px;font-weight:600;background:var(--bg2);color:var(--t2);border:1px solid var(--bdr);border-radius:5px;cursor:pointer;white-space:nowrap;transition:all .15s;display:flex;align-items:center;gap:4px" onmouseover="this.style.borderColor='var(--indigo)';this.style.color='var(--indigo)'" onmouseout="this.style.borderColor='var(--bdr)';this.style.color='var(--t2)'" title="PDF 업로드">+ PDF</div>`:``}
       <div onclick="openExportPopup()" style="padding:5px 14px;font-size:11px;font-weight:600;background:var(--indigo-d);color:var(--indigo);border:1px solid rgba(29,53,87,.2);border-radius:5px;cursor:pointer;white-space:nowrap;transition:all .15s;display:flex;align-items:center" onmouseover="this.style.background='var(--indigo)';this.style.color='#fff'" onmouseout="this.style.background='var(--indigo-d)';this.style.color='var(--indigo)'" title="Excel/CSV 내보내기">Export to Excel</div>
     </div></div>`;
-  // Hidden file input for quick upload
-  if(!document.getElementById('_quickUpload')){
-    const inp=document.createElement('input');inp.type='file';inp.id='_quickUpload';inp.accept='.pdf';inp.multiple=true;inp.style.display='none';
-    inp.onchange=()=>{if(inp.files.length){_quickUploadFiles(inp.files);inp.value='';}};
-    document.body.appendChild(inp);
-  }
+  // Hidden file input for quick upload (shared helper)
+  _ensureQuickUpload();
 
   const _lpName=h.LP_Name_full&&h.LP_Name_full!=='N/A'&&h.LP_Name_full!=='Unknown LP';
   const _lpCode=h.LP_code&&h.LP_code!=='N/A';
@@ -6411,12 +6407,12 @@ async function reparseNotice(id){
 
         if(evt.stage==='received'){
           reparseJob.status='processing';
-          if(!updateJobCard(reparseJob.id)) R();
+          if(!updateJobCard(reparseJob.id)) _updateSbBadge();
         }
         else if(evt.stage==='parsing'){
           reparseJob.tParsingStart=Date.now();
           reparseJob.status='processing';
-          if(!updateJobCard(reparseJob.id)) R();
+          if(!updateJobCard(reparseJob.id)) _updateSbBadge();
         }
         else if(evt.stage==='heartbeat'){
           // Server alive, AI still processing
@@ -6515,6 +6511,14 @@ document.addEventListener('keydown',e=>{
 
 /* Multi-file handling */
 /* Quick upload from result page — stays on current page */
+/* ★ 숨겨진 파일 input 생성 — Portfolio, Result 등 여러 페이지에서 공유 */
+function _ensureQuickUpload(){
+  if(document.getElementById('_quickUpload')) return;
+  const inp=document.createElement('input');inp.type='file';inp.id='_quickUpload';inp.accept='.pdf';inp.multiple=true;inp.style.display='none';
+  inp.onchange=()=>{if(inp.files.length){_quickUploadFiles(inp.files);inp.value='';}};
+  document.body.appendChild(inp);
+}
+
 function _quickUploadFiles(fileList){
   const files=Array.from(fileList).filter(f=>f.type.includes('pdf'));
   if(!files.length){alert('PDF 파일만 지원합니다.');return;}
@@ -6561,6 +6565,30 @@ function updateJobCard(jobId){
   return true;
 }
 
+/* ★ 경량 사이드바 배지 업데이트 — R() 호출 없이 업로드 진행 상태만 반영 */
+function _updateSbBadge(){
+  const el=document.getElementById('sbUploadBadge');
+  if(!el) return;
+  const active=S.jobs.filter(j=>j.status==='reading'||j.status==='pending'||j.status==='processing');
+  const errors=S.jobs.filter(j=>j.status==='error');
+  if(active.length){
+    const done=S.jobs.filter(j=>j.status==='done').length;
+    const label=(done+active.length>1)?done+'/'+S.jobs.length:'분석중';
+    el.innerHTML='<span class="badge proc">'+label+'</span>';
+  } else if(errors.length){
+    el.innerHTML='<span class="badge err">'+errors.length+' err</span>';
+  } else {
+    el.innerHTML='';
+  }
+}
+
+/* ★ Debounced R() — 여러 파일 동시 완료 시 R()을 한 번만 호출 */
+let _debouncedRTimer=null;
+function _debouncedR(delayMs){
+  if(_debouncedRTimer) clearTimeout(_debouncedRTimer);
+  _debouncedRTimer=setTimeout(()=>{_debouncedRTimer=null;R();}, delayMs||300);
+}
+
 async function uploadToBackend(job){
   const MAX_COMM_RETRIES=3;   // 통신 오류 시 최대 재시도
   const RETRY_DELAY_MS=5000;  // 재시도 간격 5초
@@ -6574,7 +6602,7 @@ async function uploadToBackend(job){
   try{
     job.tReadDone=Date.now();
     job.status='processing';
-    if(!updateJobCard(job.id)) R();
+    if(!updateJobCard(job.id)) _updateSbBadge();
 
     const formData=new FormData();
     formData.append('file', job._file||job.file);
@@ -6635,14 +6663,14 @@ async function uploadToBackend(job){
 
         if(evt.stage==='received'){
           job.status='processing';
-          if(!updateJobCard(job.id)) R();
+          if(!updateJobCard(job.id)) _updateSbBadge();
         }
         else if(evt.stage==='parsing'){
           job._gotParsing=true;
           job.tParsingStart=Date.now();
           job.status='processing';
           startHeartbeatChecker();
-          if(!updateJobCard(job.id)) R();
+          if(!updateJobCard(job.id)) _updateSbBadge();
         }
         else if(evt.stage==='heartbeat'){
           // Server is alive, Gemini API is still processing
@@ -6729,8 +6757,12 @@ async function uploadToBackend(job){
       const doneInBatch=S.jobs.filter(j=>j.status==='done');
       if(doneInBatch.length===1){S.activeNoticeId=noticeId;S.page='result';S.activeTab='overview';}
       else{S.page='portfolio';}
+      R(); // 페이지 전환 → 즉시 렌더
+    } else {
+      // ★ 다른 페이지에서 업로드 완료 — debounce로 여러 완료를 한 번에 반영
+      _updateSbBadge();
+      _debouncedR(500);
     }
-    R();
   }catch(e){
     if(_hbChecker){clearInterval(_hbChecker);_hbChecker=null;}
     if(job.status==='duplicate'||job.status==='multi_lp') return;
@@ -6754,7 +6786,7 @@ async function uploadToBackend(job){
       console.warn(`[RETRY] ${reason} — ${RETRY_DELAY_MS/1000}초 후 재시도 ${job._retries}/${MAX_COMM_RETRIES}: ${e.message}`);
       const el=document.getElementById('jt_'+job.id);
       if(el) el.textContent=`🔄 ${reason} — ${RETRY_DELAY_MS/1000}초 후 재시도 (${job._retries}/${MAX_COMM_RETRIES})`;
-      if(!updateJobCard(job.id)) R();
+      if(!updateJobCard(job.id)) _updateSbBadge();
       await new Promise(r=>setTimeout(r,RETRY_DELAY_MS));
       return uploadToBackend(job);
     }
@@ -6765,7 +6797,9 @@ async function uploadToBackend(job){
       :isCommError?`[통신 오류 · ${job._retries}회 재시도 후 실패] `
       :'[AI 파싱 오류] ';
     job.error=prefix+e.message;
-    console.error(e);R();
+    console.error(e);
+    // ★ 에러 시에도 경량 업데이트 (업로드 페이지라면 즉시, 아니면 debounce)
+    if(S.page==='upload'){ R(); } else { _updateSbBadge(); _debouncedR(500); }
   }
 }
 
@@ -6804,7 +6838,7 @@ async function resolveDuplicate(action){
 
             if(evt.stage==='parsing'){
               job.tParsingStart=Date.now();
-              if(!updateJobCard(job.id)) R();
+              if(!updateJobCard(job.id)) _updateSbBadge();
             }
             else if(evt.stage==='multi_lp_detect'){
               job.status='multi_lp';
@@ -7199,7 +7233,7 @@ async function _doMultiLpParse(job, codes){
 
         if(evt.stage==='lp_parsing'){
           const sj=subJobs.find(j=>j._lpCode===evt.lp_code);
-          if(sj){sj.status='processing';sj.tParsingStart=Date.now();if(!updateJobCard(sj.id))R();}
+          if(sj){sj.status='processing';sj.tParsingStart=Date.now();if(!updateJobCard(sj.id))_updateSbBadge();}
         }
         else if(evt.stage==='lp_done'){
           const sj=subJobs.find(j=>j._lpCode===evt.lp_code);
