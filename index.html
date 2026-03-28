@@ -3083,18 +3083,14 @@ canvas{width:100%;display:block}
 import * as pdfjsLib from '${PDFJS_CDN}/pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc='${PDFJS_CDN}/pdf.worker.min.mjs';
 let _doc=null,_pg=1,_pc=${pc},_zm=100,_rendering=false;
-// ★ Blob URL 기반 PDF 로딩 — 자식 창이 직접 fetch하여 자체 realm의 ArrayBuffer 획득
-// cross-window ArrayBuffer 전달의 불안정성(detach, instanceof 실패) 완전 회피
-window._loadFromUrl=async function(blobUrl,pg,pc){
+// ★ postMessage structured clone 방식 — 부모 창이 postMessage로 ArrayBuffer를 보내면
+// 브라우저가 자동으로 자식 realm에 독립 복사본을 생성. cross-origin/cross-realm 문제 없음.
+async function _loadPdf(buf,pg,pc){
   _pc=pc;_pg=pg||1;
   document.getElementById('pi').textContent=_pg+' / '+_pc;
   const ld=document.getElementById('ld');
-  if(ld){ld.querySelector('span').textContent='PDF 다운로드 중...';}
   try{
-    const resp=await fetch(blobUrl);
-    if(!resp.ok) throw new Error('Blob fetch failed: '+resp.status);
-    const buf=await resp.arrayBuffer();
-    if(!buf||buf.byteLength===0) throw new Error('Empty PDF data (0 bytes)');
+    if(!buf||buf.byteLength===0) throw new Error('Empty PDF data');
     if(ld){ld.querySelector('span').textContent='PDF 파싱 중 ('+Math.round(buf.byteLength/1024)+'KB)...';}
     _doc=await pdfjsLib.getDocument({data:buf}).promise;
     _pc=_doc.numPages;
@@ -3102,26 +3098,25 @@ window._loadFromUrl=async function(blobUrl,pg,pc){
     _render(_pg);
   }catch(e){
     console.error('PDF load error:',e);
-    if(ld){ld.querySelector('span').textContent='PDF 로드 실패: '+e.message;ld.querySelector('.spin').style.display='none';}
+    if(ld){ld.querySelector('span').textContent='PDF 로드 실패: '+e.message;
+      const sp=ld.querySelector('.spin');if(sp)sp.style.display='none';}
   }
-};
-// Legacy fallback — 직접 ArrayBuffer 전달 (Blob URL 실패 시 부모가 호출)
-window.initFromBytes=async function(buf,pg,pc){
-  _pc=pc;_pg=pg||1;
-  document.getElementById('pi').textContent=_pg+' / '+_pc;
-  const ld=document.getElementById('ld');
-  if(ld){ld.querySelector('span').textContent='PDF 파싱 중...';}
-  try{
-    const localBuf=new Uint8Array(buf).buffer;
-    _doc=await pdfjsLib.getDocument({data:localBuf}).promise;
-    _pc=_doc.numPages;
-    document.getElementById('pi').textContent=_pg+' / '+_pc;
-    _render(_pg);
-  }catch(e){
-    console.error('PDF parse error:',e);
-    if(ld){ld.querySelector('span').textContent='PDF 로드 실패: '+e.message;ld.querySelector('.spin').style.display='none';}
+}
+window.addEventListener('message',function(e){
+  if(!e.data||!e.data.type) return;
+  if(e.data.type==='loadPdf'){
+    // buf는 structured clone으로 이미 이 realm의 ArrayBuffer
+    _loadPdf(e.data.buf, e.data.pg, e.data.pc);
+  } else if(e.data.type==='applyHL'){
+    window._applyHL(e.data.loc);
+  } else if(e.data.type==='clearHL'){
+    window._clearHL();
+  } else if(e.data.type==='setTitle'){
+    window._setTitle(e.data.title);
+  } else if(e.data.type==='showError'){
+    window._showError(e.data.msg);
   }
-};
+});
 async function _render(p){
   if(!_doc||_rendering) return;
   _rendering=true;
@@ -3196,48 +3191,35 @@ window.addEventListener('unhandledrejection',function(e){if(window.opener&&!wind
   _pdfWin.document.write(html);
   _pdfWin.document.close();
 
-  // ★ PDF bytes → child window via Blob URL (cross-realm ArrayBuffer 문제 완전 회피)
+  // ★ PDF bytes → child window via postMessage structured clone
+  // postMessage는 ArrayBuffer를 자식 realm에 독립 복사 (CORS/origin/cross-realm 문제 없음)
   const _sendBytes=async ()=>{
     if(!_pdfWin||_pdfWin.closed) return;
     try{
       const targetId=_pdfNoticeId;
-      // 바이트 획득: 메모리 → IDB → 네트워크
       let buf=_pdfBytesMap.get(targetId);
       if(!buf||buf.byteLength===0) buf=await _idbGet(targetId);
       if(!buf) buf=await _fetchPdfBytes(targetId);
       if(!buf) throw new Error('PDF 바이트를 가져올 수 없음');
       if(!_pdfWin||_pdfWin.closed) return;
       _pdfBytesSet(targetId, buf);
-      // ★ Blob URL 생성 — 문자열 전달이므로 cross-realm 문제 없음
-      const blob=new Blob([buf],{type:'application/pdf'});
-      const blobUrl=URL.createObjectURL(blob);
+      // _ready 대기 후 postMessage 전송
       const _waitReady=setInterval(()=>{
-        if(!_pdfWin||_pdfWin.closed){clearInterval(_waitReady);URL.revokeObjectURL(blobUrl);return;}
+        if(!_pdfWin||_pdfWin.closed){clearInterval(_waitReady);return;}
         if(_pdfWin._ready){clearInterval(_waitReady);
-          try{
-            _pdfWin._loadFromUrl(blobUrl,_pdfPage,pc);
-            // Blob URL은 자식 창 fetch 완료 후 해제 (1분 후 안전 해제)
-            setTimeout(()=>URL.revokeObjectURL(blobUrl),60000);
-          }catch(e){
-            console.warn('PDF child load fail:',e);
-            URL.revokeObjectURL(blobUrl);
-            // Fallback: 직접 ArrayBuffer 전달 시도
-            try{_pdfWin.initFromBytes(buf,_pdfPage,pc);}catch(e2){
-              if(_pdfWin&&!_pdfWin.closed){try{_pdfWin._showError('PDF 로드 실패: '+e2.message);}catch(x){}}
-            }
-          }
+          console.log('[PDF WIN] Sending',buf.byteLength,'bytes via postMessage');
+          _pdfWin.postMessage({type:'loadPdf',buf:buf,pg:_pdfPage,pc:pc},'*');
         }
       },100);
       setTimeout(()=>{
         clearInterval(_waitReady);
-        URL.revokeObjectURL(blobUrl);
         if(_pdfWin&&!_pdfWin.closed&&!_pdfWin._ready){
-          try{_pdfWin._showError('PDF.js 로드 시간 초과');}catch(x){}
+          try{_pdfWin.postMessage({type:'showError',msg:'PDF.js 로드 시간 초과'},'*');}catch(x){}
         }
       },30000);
     }catch(e){
       console.warn('PDF send fail:',e);
-      if(_pdfWin&&!_pdfWin.closed){try{_pdfWin._showError('PDF 로드 실패: '+e.message);}catch(x){}}
+      if(_pdfWin&&!_pdfWin.closed){try{_pdfWin.postMessage({type:'showError',msg:'PDF 로드 실패: '+e.message},'*');}catch(x){}}
     }
   };
   _sendBytes();
@@ -3251,27 +3233,18 @@ async function _pdfWinSyncNotice(){
   const targetId=n.id;
   const pc=n.page_count||1;
   try{
-    _pdfWin._setTitle(n.header.notice_title||'Notice');
+    _pdfWin.postMessage({type:'setTitle',title:n.header.notice_title||'Notice'},'*');
     let buf=_pdfBytesMap.get(targetId);
     if(!buf||buf.byteLength===0) buf=await _idbGet(targetId);
     if(!buf) buf=await _fetchPdfBytes(targetId);
     if(!buf) throw new Error('PDF 바이트를 가져올 수 없음');
     if(!_pdfWinIsOpen()) return;
     _pdfBytesSet(targetId, buf);
-    // ★ Blob URL로 전달
-    const blob=new Blob([buf],{type:'application/pdf'});
-    const blobUrl=URL.createObjectURL(blob);
-    try{
-      _pdfWin._loadFromUrl(blobUrl, 1, pc);
-      setTimeout(()=>URL.revokeObjectURL(blobUrl),60000);
-    }catch(e){
-      URL.revokeObjectURL(blobUrl);
-      // Fallback: 직접 전달
-      _pdfWin.initFromBytes(buf, 1, pc);
-    }
+    console.log('[PDF WIN SYNC]',buf.byteLength,'bytes via postMessage');
+    _pdfWin.postMessage({type:'loadPdf',buf:buf,pg:1,pc:pc},'*');
   }catch(e){
     console.warn('PDF child sync fail:', e);
-    if(_pdfWinIsOpen()){try{_pdfWin._showError('PDF 로드 실패: '+e.message);}catch(x){}}
+    if(_pdfWinIsOpen()){try{_pdfWin.postMessage({type:'showError',msg:'PDF 로드 실패: '+e.message},'*');}catch(x){}}
   }
 }
 
@@ -3287,7 +3260,7 @@ function highlightPdfItem(itemIdx){
 
   // ★ 별도 창이 열려 있으면 자식 창으로 하이라이트 전달
   if(_pdfWinIsOpen()){
-    try{ _pdfWin._applyHL(loc); }catch(e){}
+    try{ _pdfWin.postMessage({type:'applyHL',loc:loc},'*'); }catch(e){}
     return;
   }
 
@@ -3336,7 +3309,7 @@ function clearPdfHL(){
   const hl=document.getElementById('pdfHL');
   if(hl){hl.classList.remove('active');hl.style.display='none';}
   // ★ 별도 창 하이라이트도 클리어
-  if(_pdfWinIsOpen()){ try{ _pdfWin._clearHL(); }catch(e){} }
+  if(_pdfWinIsOpen()){ try{ _pdfWin.postMessage({type:'clearHL'},'*'); }catch(e){} }
 }
 
 /* ===== RIGHT PANEL: AI Q&A ===== */
