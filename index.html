@@ -364,6 +364,52 @@ let _sb = null; // Supabase client
 let _session = null; // current session
 let _userRole = 'uploader'; // 'admin' | 'uploader' | 'viewer'
 
+/* ===== ERROR TOAST (Admin only) ===== */
+// console.error 가로채기 — 에러 발생 시 화면 하단에 토스트 표시
+const _origConsoleError=console.error;
+const _origConsoleWarn=console.warn;
+const _errorToasts=[];
+const _ERROR_TOAST_MAX=5;
+
+function _errorToast(msg,detail){
+  if(_userRole!=='admin') return;
+  // 중복 억제: 동일 메시지 3초 이내 재표시 방지
+  const now=Date.now();
+  if(_errorToasts.length&&_errorToasts[_errorToasts.length-1]._msg===msg&&now-_errorToasts[_errorToasts.length-1]._ts<3000) return;
+
+  const el=document.createElement('div');
+  el._msg=msg;el._ts=now;
+  el.style.cssText='position:fixed;bottom:'+(12+_errorToasts.length*58)+'px;right:12px;max-width:480px;background:#1e1e2e;color:#e2e5ea;border:1px solid #dc2626;border-radius:8px;padding:10px 14px;font-size:11px;line-height:1.5;z-index:9999;box-shadow:0 4px 20px rgba(0,0,0,.3);animation:fi .3s ease;display:flex;gap:10px;align-items:flex-start';
+  const ts=new Date().toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const shortMsg=(msg||'').substring(0,120);
+  const fullDetail=detail?(msg+'\n'+detail):msg;
+  el.innerHTML=`<div style="flex:1;min-width:0"><div style="color:#f87171;font-weight:600;margin-bottom:2px">⚠ ${ts}</div><div style="word-break:break-all;overflow:hidden;max-height:40px">${shortMsg.replace(/</g,'&lt;')}</div></div>`
+    +`<div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">`
+    +`<button onclick="navigator.clipboard.writeText(this.dataset.d);this.textContent='✓'" data-d="${fullDetail.replace(/"/g,'&quot;').replace(/</g,'&lt;')}" style="padding:2px 8px;border:1px solid #555;border-radius:4px;background:transparent;color:#aaa;cursor:pointer;font-size:10px;font-family:inherit">복사</button>`
+    +`<button onclick="this.closest('div[style]').remove()" style="padding:2px 8px;border:1px solid #555;border-radius:4px;background:transparent;color:#666;cursor:pointer;font-size:10px;font-family:inherit">✕</button>`
+    +`</div>`;
+  document.body.appendChild(el);
+  _errorToasts.push(el);
+  // 최대 5개 초과 시 오래된 것 제거
+  while(_errorToasts.length>_ERROR_TOAST_MAX){const old=_errorToasts.shift();if(old.parentNode)old.remove();}
+  // 15초 후 자동 제거
+  setTimeout(()=>{if(el.parentNode)el.remove();const idx=_errorToasts.indexOf(el);if(idx>=0)_errorToasts.splice(idx,1);},15000);
+}
+
+// console.error 가로채기
+console.error=function(...args){
+  _origConsoleError.apply(console,args);
+  try{_errorToast(args.map(a=>typeof a==='object'?JSON.stringify(a).substring(0,200):String(a)).join(' '));}catch(e){}
+};
+
+// 미처리 예외 캐치
+window.addEventListener('error',e=>{
+  if(_userRole==='admin') _errorToast('Uncaught: '+e.message, e.filename+':'+e.lineno);
+});
+window.addEventListener('unhandledrejection',e=>{
+  if(_userRole==='admin') _errorToast('Promise: '+(e.reason?.message||e.reason||'unknown'));
+});
+
 async function initAuth() {
   // Step 1: Create Supabase client (plain fetch — no auth needed)
   try {
@@ -3141,6 +3187,9 @@ window._showError=function(msg){
     ld.querySelector('span').textContent=msg;ld.style.display='flex';}
 };
 window._ready=true;
+// ★ 자식 창 에러 → 부모 창 토스트로 전달
+window.addEventListener('error',function(e){if(window.opener&&!window.opener.closed&&window.opener._errorToast)window.opener._errorToast('[PDF창] '+e.message);});
+window.addEventListener('unhandledrejection',function(e){if(window.opener&&!window.opener.closed&&window.opener._errorToast)window.opener._errorToast('[PDF창] '+(e.reason?.message||e.reason||'unknown'));});
 ` + '</' + 'script></body></html>';
 
   _pdfWin.document.open();
